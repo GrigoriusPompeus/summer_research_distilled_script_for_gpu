@@ -1,0 +1,67 @@
+# ICTC Cluster Requirements
+# ─────────────────────────────────────────────────────────────────────────────
+# Install on the cluster (inside a conda env or venv):
+#   pip install -r requirements_cluster.txt
+#
+# For flash-attention (strongly recommended on A100/H100, ~2× faster attention):
+#   pip install flash-attn --no-build-isolation
+#   # Needs matching CUDA toolkit; omit if you hit build errors — it's optional.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Core ML ──────────────────────────────────────────────────────────────────
+torch>=2.3.0
+torchvision>=0.18.0
+
+# ── HuggingFace stack ─────────────────────────────────────────────────────────
+# transformers 4.52+ has native Qwen3-VL support (no external utils needed).
+# For Qwen2.5-VL you need >=4.49; for older Qwen2-VL >=4.45 + qwen-vl-utils.
+transformers>=4.52.0
+accelerate>=0.34.0
+huggingface_hub>=0.24.0
+tokenizers>=0.21.0
+
+# ── vLLM — high-throughput inference engine ──────────────────────────────────
+# Handles tensor parallelism, continuous batching, PagedAttention.
+# Supports Qwen3-VL, Qwen2.5-VL, Llama 3.x, Mistral, and 40+ other families.
+# vLLM 0.6+ includes Qwen2.5-VL; 0.7+ includes Qwen3-VL.
+vllm>=0.7.0
+
+# ── Image handling ────────────────────────────────────────────────────────────
+pillow>=10.3.0
+
+# ── Progress / utilities ──────────────────────────────────────────────────────
+tqdm>=4.66.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTES ON MODEL-SPECIFIC PACKAGES
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Qwen3-VL (default --vlm_model):
+#   No extra packages needed — transformers>=4.52 handles everything natively.
+#
+# Qwen2.5-VL (--vlm_model Qwen/Qwen2.5-VL-*):
+#   No extra packages needed with transformers>=4.49.
+#   If using the HF fallback (not vLLM), optionally install:
+#     pip install qwen-vl-utils>=0.0.8
+#
+# Qwen2-VL (older, --vlm_model Qwen/Qwen2-VL-*):
+#   pip install qwen-vl-utils>=0.0.8   # required for HF fallback
+#
+# AWQ quantized models (--quantization awq):
+#   pip install autoawq>=0.2.5
+#
+# GPTQ quantized models (--quantization gptq):
+#   pip install auto-gptq>=0.7.0
+#
+# FP8 (--quantization fp8):
+#   Supported natively by vLLM on H100/Ada Lovelace; no extra package needed.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# QUICK INSTALL CHECK
+# Run this after installation to confirm everything loads:
+#   python -c "import torch, vllm, transformers, PIL; \
+#              print('torch:', torch.__version__); \
+#              print('vllm:', vllm.__version__); \
+#              print('transformers:', transformers.__version__); \
+#              print('GPUs:', torch.cuda.device_count())"
+# ─────────────────────────────────────────────────────────────────────────────
