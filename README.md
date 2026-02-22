@@ -83,6 +83,8 @@ All outputs go to `--output_dir`:
 | `step2a_hooks.json` | Step 2a: 2-4 word marketing hook per ad |
 | `step2b_dynamic_clusters.json` | Step 2b: K cluster definitions |
 | `step3_final_assignment.json` | Step 3: cluster assignment per ad |
+| `step2b_metadata.json` | Step 2b cache key (num_clusters + criterion) |
+| `step3_metadata.json` | Step 3 cache key (cluster names used for assignment) |
 | `ictc_final_results.json` | Combined export (all steps, all fields) |
 | `categorized_images/` | Images sorted into valid_ads / ui_only / broken |
 | `logs/ictc_*.log` | Rotating log files (one per run) |
@@ -156,6 +158,7 @@ All outputs go to `--output_dir`:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--steps` | `1,2a,2b,3` | Which steps to run (discovery always runs) |
+| `--force_steps` | *(none)* | Force re-run these steps even if output exists, e.g. `2b,3` |
 | `--max_images` | *(all)* | Cap images processed — for smoke testing |
 | `--seed` | `42` | Random seed for reproducibility |
 | `--verbose` | off | Enable DEBUG logging |
@@ -204,10 +207,23 @@ python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
   --steps 2a,2b,3
 
+# ── Iterate on criterion — VLM captions and hooks are reused automatically ───
+# Change --criterion: Steps 2b and 3 auto-detect the change and re-run.
+# Step 1 (VLM, slow) and Step 2a (hook extraction) are always reused.
+python ictc_cluster.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --criterion "Emotional Tone" --steps 2b,3
+
+# ── Force re-run specific steps regardless of existing output ────────────────
+# Useful when you want to change K or experiment with a fresh run of hooks.
+python ictc_cluster.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --num_clusters 8 --steps 2b,3 --force_steps 2b,3
+
 # ── Cluster by a different criterion (8 visual style clusters) ───────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
-  --criterion "Visual Design Style" --num_clusters 8
+  --criterion "Visual Design Style" --num_clusters 8 --steps 2b,3
 
 # ── Use only GPUs 2 and 3 on a shared node ───────────────────────────────────
 python ictc_cluster.py \
@@ -222,9 +238,39 @@ python ictc_cluster.py \
 
 ---
 
+## Iterative Criterion Refinement
+
+The ICTC paper's key insight: **only the VLM step (Step 1) is expensive**. Steps 2b and 3 run entirely on the LLM and are fast enough to iterate. The script supports this natively:
+
+```
+Run 1: full pipeline → inspect cluster names in logs
+Run 2: --steps 2b,3 --criterion "Emotional Tone"   → re-clusters in minutes
+Run 3: --steps 2b,3 --criterion "Target Audience"  → re-clusters again
+```
+
+**What gets reused across runs:**
+- `step1_captions.json` — VLM captions (never re-run unless `--force_steps 1`)
+- `step2a_hooks.json` — hook extraction (criterion-agnostic, always reusable)
+
+**What auto-invalidates when you change `--criterion` or `--num_clusters`:**
+- Step 2b — always re-runs (metadata check includes criterion + K)
+- Step 3 — auto-resets when cluster names change (detected from metadata)
+
+**`--force_steps`** bypasses checkpoint detection entirely for the listed steps, useful when you want to re-run Step 2a with fresh eyes or repeat an experiment:
+
+```bash
+# Re-extract hooks AND re-cluster (keep only VLM captions)
+python ictc_cluster.py ... --steps 2a,2b,3 --force_steps 2a,2b,3
+
+# Just redo assignment with a different K (keep existing hooks and cluster defs)
+python ictc_cluster.py ... --num_clusters 8 --steps 3 --force_steps 3
+```
+
+---
+
 ## Resume & Crash Recovery
 
-Every step saves an atomic checkpoint (write-to-tmp then rename — never corrupts):
+Every step saves an atomic checkpoint (`fsync` + `os.replace` — never corrupts even on NFS/Lustre):
 
 - **Step 1** checkpoints every `--ckpt_vlm` images (default 1 000)
 - **Steps 2a/3** checkpoint every `--ckpt_llm` items (default 5 000)
@@ -250,9 +296,10 @@ tail -f /data/out/logs/ictc_*.log
 
 ## Background: ICTC
 
-Based on the paper *"Image Clustering Conditioned on Text Criteria"*.
-This implementation uses fully local open-source models (no paid APIs) and extends the original approach with:
-- Multi-GPU tensor parallelism via vLLM
-- Batch inference for 200k+ scale
-- Configurable clustering criterion (not limited to marketing strategy)
-- Robust checkpoint/resume for multi-day runs
+Based on the paper *"Image Clustering Conditioned on Text Criteria"* (ICLR 2024).
+The paper uses LLaVA-1.5 7B + GPT-4o on ~5k images. This implementation extends it with:
+- **Fully open-source** — Qwen3-VL-30B + Llama-3.1-8B (no paid APIs)
+- **Multi-GPU tensor parallelism** via vLLM (`--vlm_tp`, `--llm_tp`)
+- **200k+ scale** — batched inference, multi-day checkpoint/resume
+- **Iterative refinement** — re-run clustering steps with new criteria in minutes, reusing VLM outputs
+- **Quantization** — AWQ/GPTQ/FP8 to fit larger models on fewer GPUs
