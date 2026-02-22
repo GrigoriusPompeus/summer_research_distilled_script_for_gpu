@@ -56,6 +56,7 @@ import argparse
 import gc
 import json
 import logging
+import os
 import re
 import shutil
 import signal
@@ -163,7 +164,10 @@ class CheckpointManager:
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        tmp.rename(path)
+            f.flush()
+            os.fsync(f.fileno())
+        # os.replace is atomic on POSIX and handles pre-existing target on Windows
+        os.replace(tmp, path)
 
     def load(self, filename: str) -> Optional[dict]:
         path = self.d / filename
@@ -197,7 +201,7 @@ def discover_images(
     log = log or logging.getLogger("ictc")
     mapping: Dict[str, dict] = {}
 
-    subdirs = [d for d in ads_dir.iterdir() if d.is_dir()]
+    subdirs = sorted(d for d in ads_dir.iterdir() if d.is_dir())
     if subdirs:
         log.info(f"Found {len(subdirs)} subdirectories — using full_data.json structure")
         for ad_dir in subdirs:
@@ -362,25 +366,33 @@ class VLMProcessor:
         )
 
     def process_batch(self, image_paths: List[Path]) -> List[dict]:
-        """Caption a batch of images. Returns list of parsed dicts."""
+        """Caption a batch of images. Returns list aligned 1:1 with image_paths."""
         from PIL import Image as PILImage
 
         images: list = []
-        valid_paths: list = []
-        for p in image_paths:
+        valid_indices: list = []
+        for i, p in enumerate(image_paths):
             try:
-                img = PILImage.open(p).convert("RGB")
-                images.append(img)
-                valid_paths.append(p)
+                with PILImage.open(p) as raw:
+                    images.append(raw.convert("RGB"))
+                valid_indices.append(i)
             except Exception as exc:
                 self.log.warning(f"Cannot open {p}: {exc}")
 
+        # Build result list aligned with original image_paths (broken for failed opens)
+        results = [_broken_entry(p) for p in image_paths]
         if not images:
-            return []
+            return results
 
+        valid_paths = [image_paths[i] for i in valid_indices]
         if self.backend == "vllm":
-            return self._process_vllm(images, valid_paths)
-        return self._process_hf(images, valid_paths)
+            valid_results = self._process_vllm(images, valid_paths)
+        else:
+            valid_results = self._process_hf(images, valid_paths)
+
+        for idx, result in zip(valid_indices, valid_results):
+            results[idx] = result
+        return results
 
     def _process_vllm(self, images: list, paths: list) -> List[dict]:
         prompt_text = self._fmt_prompt()
@@ -458,11 +470,14 @@ class VLMProcessor:
         import torch
         import torch.distributed as dist
 
-        if self.backend == "vllm":
-            del self.llm
+        if getattr(self, "backend", None) == "vllm":
+            if hasattr(self, "llm"):
+                del self.llm
         else:
-            del self.model
-        del self.processor
+            if hasattr(self, "model"):
+                del self.model
+        if hasattr(self, "processor"):
+            del self.processor
         gc.collect()
         torch.cuda.empty_cache()
         if dist.is_initialized():
@@ -551,8 +566,10 @@ class LLMProcessor:
         import torch
         import torch.distributed as dist
 
-        del self.llm
-        del self.tokenizer
+        if hasattr(self, "llm"):
+            del self.llm
+        if hasattr(self, "tokenizer"):
+            del self.tokenizer
         gc.collect()
         torch.cuda.empty_cache()
         if dist.is_initialized():
@@ -626,6 +643,7 @@ def run_step1(
 
     t0 = time.time()
     processed = len(done_ids)
+    last_ckpt = processed
     total = len(image_mapping)
 
     for batch_start in range(0, len(todo), batch_size):
@@ -666,7 +684,8 @@ def run_step1(
 
         processed += len(chunk)
 
-        if processed % checkpoint_interval < batch_size:
+        if processed - last_ckpt >= checkpoint_interval:
+            last_ckpt = processed
             ckpt.save(captions, CAPTIONS_FILE)
             ckpt.save(ui_only, UI_FILE)
             ckpt.save(broken_imgs, BROKEN_FILE)
@@ -707,6 +726,7 @@ def run_step2a(
     log.info(f"Step 2a: {len(hooks)}/{len(captions)} done, {len(todo)} remaining")
 
     processed = len(hooks)
+    last_ckpt = processed
     for batch_start in range(0, len(todo), batch_size):
         chunk = todo[batch_start: batch_start + batch_size]
         obs_ids = [item[0] for item in chunk]
@@ -715,8 +735,14 @@ def run_step2a(
             for item in chunk
         ]
 
+        # Items with no text get a placeholder so they aren't retried on resume
+        for obs_id, txt in zip(obs_ids, user_texts):
+            if not txt and obs_id not in hooks:
+                hooks[obs_id] = {"hook": "no description", "description_snippet": ""}
+
         valid_pairs = [(i, t) for i, t in zip(obs_ids, user_texts) if t]
         if not valid_pairs:
+            processed += len(chunk)
             continue
 
         v_ids, v_texts = zip(*valid_pairs)
@@ -730,7 +756,8 @@ def run_step2a(
             hooks[obs_id] = {"hook": clean, "description_snippet": txt[:100]}
 
         processed += len(chunk)
-        if processed % checkpoint_interval < batch_size:
+        if processed - last_ckpt >= checkpoint_interval:
+            last_ckpt = processed
             ckpt.save(hooks, HOOKS_FILE)
             log.info(f"  Step 2a — {processed}/{len(captions)}")
 
@@ -755,7 +782,12 @@ def run_step2b(
 
     existing = ckpt.load(CLUSTERS_FILE)
     meta = ckpt.load(META_FILE)
-    if existing and meta and meta.get("num_hooks") == len(hooks):
+    if (
+        existing and meta
+        and meta.get("num_hooks") == len(hooks)
+        and meta.get("num_clusters") == num_clusters
+        and meta.get("criterion") == criterion
+    ):
         log.info(f"Step 2b already complete ({len(existing.get('clusters', []))} clusters)")
         for c in existing.get("clusters", []):
             log.info(f"  [{c['name']}]: {c['definition']}")
@@ -790,7 +822,7 @@ def run_step2b(
         }
 
     ckpt.save(cluster_def, CLUSTERS_FILE)
-    ckpt.save({"num_hooks": len(hooks), "num_clusters": num_clusters}, META_FILE)
+    ckpt.save({"num_hooks": len(hooks), "num_clusters": num_clusters, "criterion": criterion}, META_FILE)
 
     for c in cluster_def.get("clusters", []):
         log.info(f"  [{c['name']}]: {c['definition']}")
@@ -808,7 +840,19 @@ def run_step3(
 ) -> Dict[str, dict]:
     """Assign each ad to its best-fitting cluster."""
     ASSIGN_FILE = "step3_final_assignment.json"
+    META_FILE = "step3_metadata.json"
     assignments: Dict[str, dict] = ckpt.load(ASSIGN_FILE) or {}
+    meta = ckpt.load(META_FILE)
+
+    current_cluster_names = sorted(c["name"] for c in cluster_def.get("clusters", []))
+    cached_cluster_names = sorted(meta.get("cluster_names", [])) if meta else []
+
+    if current_cluster_names != cached_cluster_names and assignments:
+        log.info(
+            "Cluster definitions changed (criterion or K updated) — "
+            "re-running Step 3 from scratch with new clusters"
+        )
+        assignments = {}
 
     if len(assignments) >= len(captions):
         log.info(f"Step 3 already complete ({len(assignments)} assignments)")
@@ -826,6 +870,7 @@ def run_step3(
     log.info(f"Step 3: {len(assignments)}/{len(captions)} done, {len(todo)} remaining")
 
     processed = len(assignments)
+    last_ckpt = processed
     for batch_start in range(0, len(todo), batch_size):
         chunk = todo[batch_start: batch_start + batch_size]
         obs_ids = [item[0] for item in chunk]
@@ -834,8 +879,14 @@ def run_step3(
             for item in chunk
         ]
 
+        # Items with no text get "Unclassified" so they aren't retried on resume
+        for obs_id, txt in zip(obs_ids, user_texts):
+            if not txt and obs_id not in assignments:
+                assignments[obs_id] = {"cluster": "Unclassified", "original_description": ""}
+
         valid_pairs = [(i, t) for i, t in zip(obs_ids, user_texts) if t]
         if not valid_pairs:
+            processed += len(chunk)
             continue
 
         v_ids, v_texts = zip(*valid_pairs)
@@ -852,11 +903,13 @@ def run_step3(
             assignments[obs_id] = {"cluster": matched, "original_description": txt[:100]}
 
         processed += len(chunk)
-        if processed % checkpoint_interval < batch_size:
+        if processed - last_ckpt >= checkpoint_interval:
+            last_ckpt = processed
             ckpt.save(assignments, ASSIGN_FILE)
             log.info(f"  Step 3 — {processed}/{len(captions)}")
 
     ckpt.save(assignments, ASSIGN_FILE)
+    ckpt.save({"cluster_names": current_cluster_names}, META_FILE)
     dist = Counter(v["cluster"] for v in assignments.values())
     log.info("Step 3 complete. Distribution:")
     for name, count in dist.most_common():
@@ -1035,6 +1088,11 @@ def parse_args() -> argparse.Namespace:
                    help="Comma-separated steps to run. Valid values: 1, 2a, 2b, 3. "
                         "Image discovery always runs. Useful values: "
                         "'1' (VLM only), '2a,2b,3' (skip VLM, resume from captions).")
+    p.add_argument("--force_steps", type=str, default=None,
+                   help="Comma-separated steps to force re-run even if their output already exists. "
+                        "E.g. '2b,3' deletes step2b/3 checkpoints and re-generates from scratch. "
+                        "Useful for iterative criterion refinement: keep Step 1+2a, redo clustering. "
+                        "Example: --steps 2a,2b,3 --force_steps 2a will re-extract hooks then re-cluster.")
     p.add_argument("--max_images", type=int, default=None,
                    help="Process at most N images total. Useful for smoke-testing "
                         "before committing to a full 200k run.")
@@ -1069,6 +1127,22 @@ def main() -> None:
     # ── Resolve per-model quantization ─────────────────────────────────────
     vlm_quant = args.vlm_quantization or args.quantization
     llm_quant = args.llm_quantization or args.quantization
+
+    # ── Force-clear checkpoints for specified steps ─────────────────────────
+    # Maps each step to the files that must be deleted to trigger a fresh run.
+    _STEP_FILES = {
+        "1":  ["step1_captions.json", "ui_only_images.json", "broken_images.json"],
+        "2a": ["step2a_hooks.json"],
+        "2b": ["step2b_dynamic_clusters.json", "step2b_metadata.json"],
+        "3":  ["step3_final_assignment.json", "step3_metadata.json"],
+    }
+    if args.force_steps:
+        for s in (s.strip() for s in args.force_steps.split(",")):
+            for fname in _STEP_FILES.get(s, []):
+                fp = args.output_dir / fname
+                if fp.exists():
+                    fp.unlink()
+                    log.info(f"  [force_steps] Deleted {fname} — step {s} will re-run")
 
     # Graceful shutdown on SIGTERM / SIGINT
     def _shutdown(sig, frame):  # noqa: ANN001
