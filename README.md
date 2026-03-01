@@ -1,8 +1,19 @@
-# ICTC VLM Clustering — GPU Cluster Script
+# ICTC VLM Clustering — GPU Scripts
 
-Production-ready script implementing **Image Clustering Conditioned on Text Criteria (ICTC)** for large-scale image clustering on multi-GPU clusters.
+Production-ready scripts implementing **Image Clustering Conditioned on Text Criteria (ICTC)** for large-scale image clustering using a unified **Qwen3.5-27B** model.
 
-Designed to run on **2× A100 GPUs** with **200 k+ images** over multiple days, with full checkpoint/resume support and SSH resilience.
+Based on **Experiment 3B** findings: a single Qwen 3.5 model handles both vision captioning and text reasoning, producing better clusters than a separate VLM + LLM pipeline (higher coherence, better balance, zero unclassified ads).
+
+---
+
+## Repository Contents
+
+| File | Description |
+|------|-------------|
+| `ictc_cluster.py` | **Multi-GPU production pipeline** — unified or separate model modes, tensor parallelism, full crash resume |
+| `ictc_cluster_single_gpu.py` | **Single-GPU shard script** — horizontal scaling across VMs, merge results after |
+| `run_ictc.sh` | tmux wrapper for SSH-resilient execution on cluster nodes |
+| `requirements_cluster.txt` | pip dependencies (torch, vLLM, transformers, pillow, tqdm) |
 
 ---
 
@@ -10,14 +21,15 @@ Designed to run on **2× A100 GPUs** with **200 k+ images** over multiple days, 
 
 ```
 Step 0  Discovery   Scan dataset, build image map
-Step 1  VLM         Qwen3-VL captions each image → {category, brand, text, summary}
-Step 2a LLM         Extract 2-4 word "marketing hook" per ad
-Step 2b LLM         Synthesize top hooks → K cluster definitions  (single call)
-Step 3  LLM         Assign each ad to its best-fitting cluster
+Step 1  VLM         Qwen3.5-27B captions each image → {category, brand, text, summary}
+Step 2a Text        Same model extracts 2-4 word "marketing hook" per ad
+Step 2b Text        Same model synthesizes top hooks → K cluster definitions  (single call)
+Step 3  Text        Same model assigns each ad to its best-fitting cluster
 ```
 
-Default models: **Qwen3-VL-30B** (VLM) + **Llama-3.1-8B** (LLM)
-Any vLLM-supported model works — swap via `--vlm_model` / `--llm_model`.
+Default model: **Qwen/Qwen3.5-27B** — natively multimodal (early fusion), handles all steps without model swap.
+
+Legacy mode: pass `--llm_model <model_id>` to use a separate LLM for Steps 2a/2b/3 (multi-GPU script only).
 
 ---
 
@@ -46,11 +58,63 @@ chmod +x run_ictc.sh
 
 ---
 
+## Script 1: `ictc_cluster.py` — Multi-GPU Production Pipeline
+
+Runs the full ICTC pipeline on a multi-GPU cluster. Supports two modes:
+
+- **Unified mode** (default): Single Qwen3.5-27B model stays loaded for all steps — no expensive unload/reload.
+- **Separate mode** (legacy): VLM for Step 1, unload, then load a dedicated LLM for Steps 2a/2b/3. Use `--llm_model meta-llama/Llama-3.1-8B-Instruct` to activate.
+
+```bash
+# Unified (default) — 2x A100-80GB
+python ictc_cluster.py \
+  --ads_dir /data/ads --output_dir /data/out
+
+# Separate VLM + LLM (legacy)
+python ictc_cluster.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --llm_model meta-llama/Llama-3.1-8B-Instruct
+
+# 4-GPU node
+python ictc_cluster.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --num_gpus 4
+```
+
+---
+
+## Script 2: `ictc_cluster_single_gpu.py` — Single-GPU Sharding
+
+Same pipeline, but designed for **one GPU per VM**. Multiple VMs process different image ranges, then results are merged.
+
+Always uses unified mode (single model for all steps, `tp=1`).
+
+```bash
+# VM 1: process images 0–50k
+python ictc_cluster_single_gpu.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --start_index 0 --end_index 50000 --shard_id shard_0
+
+# VM 2: process images 50k–100k
+python ictc_cluster_single_gpu.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --start_index 50000 --end_index 100000 --shard_id shard_1
+
+# After all VMs finish — merge on any machine:
+python ictc_cluster_single_gpu.py --merge_shards \
+  /data/out/shard_0 /data/out/shard_1 \
+  --output_dir /data/out/merged
+```
+
+Sharding is deterministic: all VMs discover the full image set, sort keys identically, then each takes its `[start_index, end_index)` slice.
+
+---
+
 ## Input Data Format
 
-The script supports two layouts:
+The scripts support two layouts:
 
-**A. Subdirectory format** (same as your existing dataset):
+**A. Subdirectory format** (same as the existing dataset):
 ```
 ads/
 ├── <uuid-1>/
@@ -72,7 +136,7 @@ images/
 
 ## Output Files
 
-All outputs go to `--output_dir`:
+All outputs go to `--output_dir` (or `--output_dir/<shard_id>/` for single-GPU shards):
 
 | File | Contents |
 |------|----------|
@@ -91,7 +155,7 @@ All outputs go to `--output_dir`:
 
 ---
 
-## CLI Reference
+## CLI Reference — `ictc_cluster.py`
 
 ### Paths
 | Flag | Default | Description |
@@ -102,15 +166,15 @@ All outputs go to `--output_dir`:
 ### Model Selection
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--vlm_model` | `Qwen/Qwen3-VL-30B-Instruct` | VLM for image captioning (Step 1) |
-| `--llm_model` | `meta-llama/Llama-3.1-8B-Instruct` | LLM for clustering steps (2a/2b/3) |
+| `--vlm_model` | `Qwen/Qwen3.5-27B` | VLM for image captioning. In unified mode, also handles text steps |
+| `--llm_model` | `unified` | `unified` = reuse VLM for all steps. Set to a model ID for separate LLM |
 
 ### GPU Configuration
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--num_gpus` | `2` | Total GPUs — sets tensor-parallel for both models |
-| `--vlm_tp` | *(from num_gpus)* | Tensor-parallel degree for VLM only |
-| `--llm_tp` | `1` | Tensor-parallel degree for LLM only |
+| `--num_gpus` | *(auto)* | Total GPUs — sets tensor-parallel for both models |
+| `--vlm_tp` | *(from num_gpus or 2)* | Tensor-parallel degree for VLM |
+| `--llm_tp` | *(from num_gpus or 1)* | Tensor-parallel degree for LLM (separate mode) |
 | `--gpu_ids` | *(all visible)* | CUDA device IDs, e.g. `"0,1"` or `"2,3"` |
 | `--gpu_util` | `0.90` | vLLM memory utilization per GPU (0.0–1.0) |
 
@@ -165,25 +229,45 @@ All outputs go to `--output_dir`:
 
 ---
 
+## CLI Reference — `ictc_cluster_single_gpu.py`
+
+Key differences from multi-GPU version:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--start_index` | `0` | Start index into sorted image list (inclusive) |
+| `--end_index` | *(end)* | End index into sorted image list (exclusive) |
+| `--shard_id` | *(none)* | Shard subdirectory name (e.g. `shard_0`) |
+| `--merge_shards` | *(none)* | Merge mode: pass shard directory paths |
+| `--gpu_id` | *(auto)* | Single CUDA device ID (e.g. `"0"`) |
+| `--max_model_len` | `4096` | Single context window (no separate vlm/llm) |
+| `--batch_vlm` | `4` | Lower default for single GPU |
+| `--batch_llm` | `64` | Lower default for single GPU |
+| `--ckpt_vlm` | `500` | More frequent checkpointing |
+| `--ckpt_llm` | `2000` | More frequent checkpointing |
+
+No `--llm_model`, `--num_gpus`, `--vlm_tp`, `--llm_tp` flags — always unified mode, always `tp=1`.
+
+---
+
 ## GPU Memory Guide
 
 | Model | VRAM (bf16) | Config |
 |-------|------------|--------|
-| Qwen3-VL-7B | ~14 GB | `--vlm_tp 1` (single A100-40GB) |
-| Qwen3-VL-30B | ~60 GB | `--vlm_tp 2` (two A100-80GB) ← **default** |
-| Qwen3-VL-72B | ~144 GB | `--vlm_tp 4` or use AWQ |
-| Qwen3-VL-72B-AWQ | ~57 GB | `--vlm_tp 2 --quantization awq` |
-| Qwen2.5-VL-7B | ~14 GB | `--vlm_tp 1` |
+| Qwen3.5-27B | ~54 GB | `--vlm_tp 2` (two A100-80GB) — **default** |
+| Qwen3.5-27B-FP8 | ~27 GB | `--vlm_tp 1 --quantization fp8` (single A100-40GB) |
+| Qwen2.5-VL-7B | ~14 GB | `--vlm_tp 1` (single L4/A10) |
 | Qwen2.5-VL-32B | ~64 GB | `--vlm_tp 2` |
-| Llama-3.1-8B | ~16 GB | `--llm_tp 1` |
-| Llama-3.1-70B | ~140 GB | `--llm_tp 2` or AWQ |
+| Qwen3-VL-30B | ~60 GB | `--vlm_tp 2` |
+
+For single-GPU sharding, use FP8 quantization to fit Qwen3.5-27B on an A100-40GB, or use a smaller model like Qwen2.5-VL-7B on L4/A10.
 
 ---
 
 ## Common Recipes
 
 ```bash
-# ── 2x A100-80GB, default Qwen3-VL-30B + Llama-3.1-8B ──────────────────────
+# ── Unified Qwen3.5-27B on 2x A100-80GB (default) ──────────────────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out
 
@@ -192,14 +276,17 @@ python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
   --num_gpus 4
 
-# ── Fit Qwen3-VL-72B on 2x A100-80GB using AWQ quantization ─────────────────
+# ── Separate VLM + LLM (legacy two-model mode) ─────────────────────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
-  --vlm_model Qwen/Qwen3-VL-72B-Instruct-AWQ \
-  --vlm_tp 2 --vlm_quantization awq
+  --llm_model meta-llama/Llama-3.1-8B-Instruct
+
+# ── FP8 quantization to fit on single A100-40GB ────────────────────────────
+python ictc_cluster.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --vlm_tp 1 --quantization fp8
 
 # ── Resume after crash (re-run same command) ─────────────────────────────────
-# Checkpoints are automatic — just re-run and it picks up where it left off.
 python ictc_cluster.py --ads_dir /data/ads --output_dir /data/out
 
 # ── Skip VLM (Step 1 already done, only re-run clustering steps) ─────────────
@@ -207,23 +294,26 @@ python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
   --steps 2a,2b,3
 
-# ── Iterate on criterion — VLM captions and hooks are reused automatically ───
-# Change --criterion: Steps 2b and 3 auto-detect the change and re-run.
-# Step 1 (VLM, slow) and Step 2a (hook extraction) are always reused.
+# ── Iterate on criterion — change what dimension to cluster by ───────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
   --criterion "Emotional Tone" --steps 2b,3
 
-# ── Force re-run specific steps regardless of existing output ────────────────
-# Useful when you want to change K or experiment with a fresh run of hooks.
+# ── Force re-run specific steps ─────────────────────────────────────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
   --num_clusters 8 --steps 2b,3 --force_steps 2b,3
 
-# ── Cluster by a different criterion (8 visual style clusters) ───────────────
-python ictc_cluster.py \
-  --ads_dir /data/ads --output_dir /data/out \
-  --criterion "Visual Design Style" --num_clusters 8 --steps 2b,3
+# ── Horizontal sharding across 4 single-GPU VMs ─────────────────────────────
+# VM 1:
+python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \
+  --start_index 0 --end_index 50000 --shard_id shard_0
+# VM 2:
+python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \
+  --start_index 50000 --end_index 100000 --shard_id shard_1
+# Merge:
+python ictc_cluster_single_gpu.py --merge_shards \
+  /data/out/shard_0 /data/out/shard_1 --output_dir /data/out/merged
 
 # ── Use only GPUs 2 and 3 on a shared node ───────────────────────────────────
 python ictc_cluster.py \
@@ -240,7 +330,7 @@ python ictc_cluster.py \
 
 ## Iterative Criterion Refinement
 
-The ICTC paper's key insight: **only the VLM step (Step 1) is expensive**. Steps 2b and 3 run entirely on the LLM and are fast enough to iterate. The script supports this natively:
+The ICTC paper's key insight: **only the VLM step (Step 1) is expensive**. Steps 2b and 3 are fast enough to iterate. The script supports this natively:
 
 ```
 Run 1: full pipeline → inspect cluster names in logs
@@ -256,13 +346,13 @@ Run 3: --steps 2b,3 --criterion "Target Audience"  → re-clusters again
 - Step 2b — always re-runs (metadata check includes criterion + K)
 - Step 3 — auto-resets when cluster names change (detected from metadata)
 
-**`--force_steps`** bypasses checkpoint detection entirely for the listed steps, useful when you want to re-run Step 2a with fresh eyes or repeat an experiment:
+**`--force_steps`** bypasses checkpoint detection entirely:
 
 ```bash
 # Re-extract hooks AND re-cluster (keep only VLM captions)
 python ictc_cluster.py ... --steps 2a,2b,3 --force_steps 2a,2b,3
 
-# Just redo assignment with a different K (keep existing hooks and cluster defs)
+# Just redo assignment with a different K
 python ictc_cluster.py ... --num_clusters 8 --steps 3 --force_steps 3
 ```
 
@@ -272,8 +362,8 @@ python ictc_cluster.py ... --num_clusters 8 --steps 3 --force_steps 3
 
 Every step saves an atomic checkpoint (`fsync` + `os.replace` — never corrupts even on NFS/Lustre):
 
-- **Step 1** checkpoints every `--ckpt_vlm` images (default 1 000)
-- **Steps 2a/3** checkpoint every `--ckpt_llm` items (default 5 000)
+- **Step 1** checkpoints every `--ckpt_vlm` images (default 1000 multi-GPU, 500 single-GPU)
+- **Steps 2a/3** checkpoint every `--ckpt_llm` items (default 5000 multi-GPU, 2000 single-GPU)
 
 To resume after any failure: **just re-run the same command.** Each step detects existing output and skips already-processed items.
 
@@ -298,8 +388,10 @@ tail -f /data/out/logs/ictc_*.log
 
 Based on the paper *"Image Clustering Conditioned on Text Criteria"* (ICLR 2024).
 The paper uses LLaVA-1.5 7B + GPT-4o on ~5k images. This implementation extends it with:
-- **Fully open-source** — Qwen3-VL-30B + Llama-3.1-8B (no paid APIs)
+- **Unified model** — Qwen3.5-27B for both vision and text (based on Experiment 3B results)
+- **Fully open-source** — no paid APIs
 - **Multi-GPU tensor parallelism** via vLLM (`--vlm_tp`, `--llm_tp`)
+- **Single-GPU horizontal sharding** across VMs with deterministic merge
 - **200k+ scale** — batched inference, multi-day checkpoint/resume
 - **Iterative refinement** — re-run clustering steps with new criteria in minutes, reusing VLM outputs
 - **Quantization** — AWQ/GPTQ/FP8 to fit larger models on fewer GPUs

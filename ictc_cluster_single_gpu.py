@@ -1,56 +1,47 @@
 #!/usr/bin/env python3
 """
-ICTC VLM Clustering — Production Script for GPU Cluster (Unified Model)
-=========================================================================
-Implements "Image Clustering Conditioned on Text Criteria" at scale.
-Based on Experiment 3B findings: a single Qwen 3.5 model handles BOTH
-vision captioning AND text reasoning, producing better clusters than a
-separate VLM + LLM pipeline (higher coherence, better balance, zero
-unclassified ads).
+ICTC VLM Clustering — Single-GPU Shard Script (Unified Qwen 3.5)
+===================================================================
+Runs the ICTC pipeline on a SINGLE GPU, processing a specific range of
+images.  Designed for horizontal scaling: run multiple instances on
+separate VMs (each with 1 GPU), then merge the shard results.
 
-Pipeline (unified mode — default):
-  Step 0  — Discover images from dataset structure
-  Step 1  — Qwen3.5-27B captioning : image -> JSON {category, brand, text, description}
+Pipeline (always unified — single model for all steps):
+  Step 0  — Discover images, select shard range [start_index, end_index)
+  Step 1  — Qwen3.5 captioning     : image -> JSON {category, brand, text, description}
   Step 2a — Same model (text-only)  : extract 2-4 word marketing hook per ad
   Step 2b — Same model (text-only)  : synthesize K cluster definitions from top hooks
   Step 3  — Same model (text-only)  : assign each ad -> best cluster
 
-  In unified mode the model stays loaded for all steps — no expensive
-  unload/reload between VLM and LLM phases.  To use a separate LLM
-  (e.g. Llama), pass --llm_model explicitly.
+Sharding example (200k images across 4 single-GPU VMs):
+  # VM 1:
+  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
+    --start_index 0 --end_index 50000 --shard_id shard_0
 
-Designed for:
-  * Any number of GPUs  (set --num_gpus N, or fine-tune --vlm_tp / --llm_tp separately)
-  * 200 k+ images       (batched inference, multi-day runs)
-  * SSH-resilient       (all output to rotating log files, atomic JSON saves)
-  * Full resume         (every step checkpoints; re-run to continue after crash)
-  * Any quantization    (--quantization awq/gptq/fp8 for fitting larger models)
+  # VM 2:
+  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
+    --start_index 50000 --end_index 100000 --shard_id shard_1
 
-Quick start (unified — recommended):
-  python ictc_cluster.py \\
-    --ads_dir     /data/dataset/ads \\
-    --output_dir  /data/results/run1 \\
-    --num_clusters 5
+  # VM 3:
+  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
+    --start_index 100000 --end_index 150000 --shard_id shard_2
 
-Separate VLM + LLM (legacy):
-  python ictc_cluster.py \\
-    --ads_dir /data/ads --output_dir /data/out \\
-    --llm_model meta-llama/Llama-3.1-8B-Instruct
+  # VM 4:
+  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
+    --start_index 150000 --end_index 200000 --shard_id shard_3
 
-Smoke test (100 images):
-  python ictc_cluster.py --ads_dir ... --output_dir ... --max_images 100 --verbose
+Merging shards after all VMs finish:
+  python ictc_cluster_single_gpu.py --merge_shards \\
+    /data/out/shard_0 /data/out/shard_1 /data/out/shard_2 /data/out/shard_3 \\
+    --output_dir /data/out/merged
 
-GPU memory guide (bfloat16, no quantization):
-  Model                  VRAM    Recommended config
+GPU memory guide (single GPU, bfloat16):
+  Model                  VRAM    Notes
   ─────────────────────────────────────────────────────────────
-  Qwen3.5-27B           ~54 GB  --vlm_tp 2  (two A100-80GB)  <- default (unified)
-  Qwen3.5-27B-FP8       ~27 GB  --vlm_tp 1  --quantization fp8
-  Qwen2.5-VL-7B         ~14 GB  --vlm_tp 1  (single A100/L40)
-  Qwen2.5-VL-32B        ~64 GB  --vlm_tp 2
-  Qwen3-VL-30B          ~60 GB  --vlm_tp 2
-
-  Tip: --num_gpus 4 sets vlm_tp=4 automatically.
-       Override individually with --vlm_tp / --llm_tp.
+  Qwen3.5-27B           ~54 GB  A100-80GB / H100-80GB  <- default
+  Qwen3.5-27B-FP8       ~27 GB  A100-40GB / A6000-48GB
+  Qwen2.5-VL-7B         ~14 GB  L4 / T4 / A10
+  Qwen3-VL-7B           ~14 GB  L4 / T4 / A10
 """
 
 import argparse
@@ -270,7 +261,7 @@ def discover_images(
 
 
 # ---------------------------------------------------------------------------
-# VLM PROCESSOR  (Step 1 — unified Qwen3.5 via vLLM, or any HF VLM)
+# VLM PROCESSOR  (unified Qwen3.5 — handles all steps via vLLM)
 # ---------------------------------------------------------------------------
 
 class VLMProcessor:
@@ -536,7 +527,7 @@ class VLMProcessor:
 
 
 # ---------------------------------------------------------------------------
-# LLM PROCESSOR  (Steps 2a / 2b / 3 — separate LLM via vLLM, legacy mode)
+# LLM PROCESSOR  (unused in unified mode — kept for compatibility)
 # ---------------------------------------------------------------------------
 
 class LLMProcessor:
@@ -1033,60 +1024,63 @@ def export_results(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="ICTC VLM Clustering — unified Qwen 3.5 pipeline for GPU cluster",
+        description="ICTC VLM Clustering — single-GPU shard script (unified Qwen 3.5)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  # 2x A100-80GB, unified Qwen3.5-27B for all steps (default)\n"
-            "  python ictc_cluster.py --ads_dir /data/ads --output_dir /data/out\n\n"
-            "  # Separate VLM + LLM (legacy mode)\n"
-            "  python ictc_cluster.py --ads_dir /data/ads --output_dir /data/out \\\n"
-            "    --llm_model meta-llama/Llama-3.1-8B-Instruct\n\n"
-            "  # 4x GPU node, auto tensor-parallel\n"
-            "  python ictc_cluster.py --ads_dir /data/ads --output_dir /data/out --num_gpus 4\n\n"
-            "  # Different domain: cluster by visual style instead of marketing\n"
-            "  python ictc_cluster.py --ads_dir /data/ads --output_dir /data/out \\\n"
-            "    --criterion 'Visual Design Style' --num_clusters 8\n\n"
-            "  # Resume after crash (just re-run same command)\n"
-            "  python ictc_cluster.py --ads_dir /data/ads --output_dir /data/out\n"
+            "  # Process first 50k images on this VM\n"
+            "  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\\n"
+            "    --start_index 0 --end_index 50000 --shard_id shard_0\n\n"
+            "  # Process next 50k on another VM\n"
+            "  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\\n"
+            "    --start_index 50000 --end_index 100000 --shard_id shard_1\n\n"
+            "  # Merge all shard results\n"
+            "  python ictc_cluster_single_gpu.py --merge_shards \\\n"
+            "    /data/out/shard_0 /data/out/shard_1 --output_dir /data/out/merged\n\n"
+            "  # Small GPU (L4/A10) — use 7B model\n"
+            "  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\\n"
+            "    --vlm_model Qwen/Qwen2.5-VL-7B-Instruct\n"
         ),
     )
 
+    # ── Merge mode (run this after all shards complete) ────────────────────
+    p.add_argument("--merge_shards", nargs="*", type=Path, default=None,
+                   help="Merge mode: pass paths to shard output directories. "
+                        "Combines step1_captions, step2a_hooks, step3_assignments "
+                        "into a single result set in --output_dir.")
+
     # ── Paths ──────────────────────────────────────────────────────────────
-    p.add_argument("--ads_dir", type=Path, required=True,
+    p.add_argument("--ads_dir", type=Path, default=None,
                    help="Root of ad dataset (contains <uuid>/ subdirs with full_data.json, "
-                        "OR a flat directory of .jpg/.png files)")
+                        "OR a flat directory of .jpg/.png files). "
+                        "Required unless --merge_shards is used.")
     p.add_argument("--output_dir", type=Path, required=True,
-                   help="Where to write checkpoints, results and logs")
+                   help="Where to write checkpoints, results and logs. "
+                        "When --shard_id is set, outputs go to output_dir/shard_id/.")
+
+    # ── Sharding ───────────────────────────────────────────────────────────
+    p.add_argument("--start_index", type=int, default=0,
+                   help="Start index into the sorted image list (inclusive). "
+                        "Default 0 = start from the first image.")
+    p.add_argument("--end_index", type=int, default=None,
+                   help="End index into the sorted image list (exclusive). "
+                        "Default None = process until the last image.")
+    p.add_argument("--shard_id", type=str, default=None,
+                   help="Unique shard identifier (e.g. 'shard_0', 'gpu3'). "
+                        "Creates output_dir/shard_id/ subdirectory. "
+                        "If not set, results go directly into output_dir.")
 
     # ── Model selection ────────────────────────────────────────────────────
     p.add_argument("--vlm_model", default="Qwen/Qwen3.5-27B",
-                   help="HuggingFace model ID for the VLM (Step 1 image captioning). "
-                        "In unified mode (default) this model also handles Steps 2a/2b/3. "
-                        "Qwen3.5-27B, Qwen3-VL-*, Qwen2.5-VL-*, LLaVA-*, etc.")
-    p.add_argument("--llm_model", default="unified",
-                   help="LLM for Steps 2a/2b/3.  'unified' (default) = reuse the VLM "
-                        "for all text steps (no unload/reload, recommended).  Set to a "
-                        "separate model ID (e.g. meta-llama/Llama-3.1-8B-Instruct) "
-                        "for legacy two-model mode.")
+                   help="HuggingFace model ID. This single model handles all steps "
+                        "(unified mode). Qwen3.5-27B (A100-80GB), Qwen2.5-VL-7B (L4/A10).")
 
-    # ── GPU / parallelism ──────────────────────────────────────────────────
-    p.add_argument("--num_gpus", type=int, default=None,
-                   help="Total visible GPUs. Sets BOTH --vlm_tp and --llm_tp to this value "
-                        "unless those are specified explicitly. Convenience shorthand for "
-                        "'use all available GPUs for whichever model is currently loaded.'")
-    p.add_argument("--vlm_tp", type=int, default=None,
-                   help="Tensor-parallel degree for VLM (overrides --num_gpus for VLM). "
-                        "Rule of thumb: model_size_GB / gpu_vram_GB, rounded up.")
-    p.add_argument("--llm_tp", type=int, default=None,
-                   help="Tensor-parallel degree for LLM (overrides --num_gpus for LLM). "
-                        "Usually 1 is fine for 8B models.")
-    p.add_argument("--gpu_ids", type=str, default=None,
-                   help="Comma-separated CUDA device IDs to use, e.g. '0,1' or '0,1,2,3'. "
-                        "Sets CUDA_VISIBLE_DEVICES before any GPU code runs. "
-                        "Leave unset to use all available GPUs.")
+    # ── GPU ────────────────────────────────────────────────────────────────
+    p.add_argument("--gpu_id", type=str, default=None,
+                   help="CUDA device ID to use, e.g. '0'. "
+                        "Sets CUDA_VISIBLE_DEVICES before any GPU code runs.")
     p.add_argument("--gpu_util", type=float, default=0.90,
-                   help="vLLM GPU memory utilization per device (0.0–1.0). "
+                   help="vLLM GPU memory utilization (0.0–1.0). "
                         "Lower this if you see OOM during model load.")
 
     # ── Precision / quantization ───────────────────────────────────────────
@@ -1096,80 +1090,119 @@ def parse_args() -> argparse.Namespace:
                         "Use float16 for older GPUs (V100, T4).")
     p.add_argument("--quantization", type=str, default=None,
                    choices=["awq", "gptq", "fp8", "squeezellm", None],
-                   help="Quantization format. Use 'awq' or 'gptq' to fit larger models "
-                        "(e.g. 72B on 2x A100-80GB). Must match the model's published format.")
-    p.add_argument("--vlm_quantization", type=str, default=None,
-                   choices=["awq", "gptq", "fp8", "squeezellm", None],
-                   help="Override --quantization for VLM only.")
-    p.add_argument("--llm_quantization", type=str, default=None,
-                   choices=["awq", "gptq", "fp8", "squeezellm", None],
-                   help="Override --quantization for LLM only.")
+                   help="Quantization format. Use 'fp8' to fit Qwen3.5-27B on A100-40GB.")
 
     # ── Context / image resolution ─────────────────────────────────────────
-    p.add_argument("--vlm_max_model_len", type=int, default=4096,
-                   help="VLM context window (tokens). Increase for longer ad text or "
-                        "higher image resolution. Larger = more VRAM.")
-    p.add_argument("--llm_max_model_len", type=int, default=4096,
-                   help="LLM context window (tokens). 4096 is plenty for hook extraction.")
+    p.add_argument("--max_model_len", type=int, default=4096,
+                   help="Model context window (tokens). 4096 is fine for most ads. "
+                        "Increase for very long text. Larger = more VRAM.")
     p.add_argument("--max_image_tokens", type=int, default=1280,
-                   help="Max image token budget per image (Qwen3-VL / Qwen2.5-VL). "
-                        "Higher = better quality on dense text ads but more VRAM. "
+                   help="Max image token budget per image. "
                         "Default 1280 ≈ 1008x1008 px at 28px/token.")
 
     # ── vLLM engine tuning ─────────────────────────────────────────────────
     p.add_argument("--enforce_eager", action="store_true",
-                   help="Disable CUDA graph capture in vLLM. Slower but uses less VRAM "
-                        "and avoids graph-capture OOM on large models.")
+                   help="Disable CUDA graph capture in vLLM. Slower but uses less VRAM.")
     p.add_argument("--swap_space", type=int, default=4,
-                   help="CPU swap space per GPU in GB (vLLM). Increase if you see "
-                        "KV-cache eviction warnings.")
+                   help="CPU swap space in GB (vLLM).")
 
     # ── Batching ───────────────────────────────────────────────────────────
-    p.add_argument("--batch_vlm", type=int, default=8,
-                   help="Images submitted per vLLM generate() call. "
-                        "Reduce to 2–4 if you get OOM during Step 1.")
-    p.add_argument("--batch_llm", type=int, default=128,
-                   help="Text prompts per LLM generate() call. Can be very large (256–512) "
-                        "for 8B models; vLLM handles continuous batching internally.")
+    p.add_argument("--batch_vlm", type=int, default=4,
+                   help="Images per vLLM generate() call. "
+                        "Lower than multi-GPU version (4 vs 8) to fit in single GPU.")
+    p.add_argument("--batch_llm", type=int, default=64,
+                   help="Text prompts per generate() call. "
+                        "Lower than multi-GPU version for single-GPU VRAM.")
 
     # ── Checkpointing ──────────────────────────────────────────────────────
-    p.add_argument("--ckpt_vlm", type=int, default=1000,
-                   help="Save Step 1 checkpoint every N images processed.")
-    p.add_argument("--ckpt_llm", type=int, default=5000,
-                   help="Save Steps 2a/3 checkpoint every N items processed.")
+    p.add_argument("--ckpt_vlm", type=int, default=500,
+                   help="Save Step 1 checkpoint every N images.")
+    p.add_argument("--ckpt_llm", type=int, default=2000,
+                   help="Save Steps 2a/3 checkpoint every N items.")
 
     # ── ICTC / clustering parameters ──────────────────────────────────────
     p.add_argument("--num_clusters", type=int, default=5,
-                   help="Number of clusters K to produce. Higher K = more granular grouping.")
+                   help="Number of clusters K to produce.")
     p.add_argument("--top_hooks", type=int, default=60,
-                   help="Top-N most frequent hooks fed to Step 2b cluster synthesis. "
-                        "60–100 works well; too many may overflow LLM context.")
+                   help="Top-N most frequent hooks fed to Step 2b cluster synthesis.")
     p.add_argument("--criterion", type=str, default="Marketing Strategy",
-                   help="Clustering criterion sent to the LLM. Controls what dimension "
-                        "the clusters represent. Examples: 'Marketing Strategy', "
-                        "'Visual Design Style', 'Target Audience', 'Emotional Tone'.")
+                   help="Clustering criterion. Examples: 'Marketing Strategy', "
+                        "'Visual Design Style', 'Target Audience'.")
 
     # ── Reproducibility ────────────────────────────────────────────────────
     p.add_argument("--seed", type=int, default=42,
-                   help="Random seed for vLLM sampling (Step 2a/3 temperature>0 calls).")
+                   help="Random seed for vLLM sampling.")
 
     # ── Pipeline control ───────────────────────────────────────────────────
     p.add_argument("--steps", default="1,2a,2b,3",
-                   help="Comma-separated steps to run. Valid values: 1, 2a, 2b, 3. "
-                        "Image discovery always runs. Useful values: "
-                        "'1' (VLM only), '2a,2b,3' (skip VLM, resume from captions).")
+                   help="Comma-separated steps to run. Valid: 1, 2a, 2b, 3.")
     p.add_argument("--force_steps", type=str, default=None,
-                   help="Comma-separated steps to force re-run even if their output already exists. "
-                        "E.g. '2b,3' deletes step2b/3 checkpoints and re-generates from scratch. "
-                        "Useful for iterative criterion refinement: keep Step 1+2a, redo clustering. "
-                        "Example: --steps 2a,2b,3 --force_steps 2a will re-extract hooks then re-cluster.")
-    p.add_argument("--max_images", type=int, default=None,
-                   help="Process at most N images total. Useful for smoke-testing "
-                        "before committing to a full 200k run.")
+                   help="Comma-separated steps to force re-run. E.g. '2b,3'.")
     p.add_argument("--verbose", action="store_true",
-                   help="Enable DEBUG-level logging (very chatty).")
+                   help="Enable DEBUG-level logging.")
 
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# MERGE SHARDS
+# ---------------------------------------------------------------------------
+
+def merge_shards(shard_dirs: List[Path], output_dir: Path, log: logging.Logger) -> None:
+    """Merge checkpoint JSONs from multiple shard directories into one."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = CheckpointManager(output_dir)
+
+    merged_mapping: Dict[str, dict] = {}
+    merged_captions: Dict[str, dict] = {}
+    merged_ui: Dict[str, dict] = {}
+    merged_broken: Dict[str, dict] = {}
+    merged_hooks: Dict[str, dict] = {}
+    merged_assignments: Dict[str, dict] = {}
+
+    for sd in shard_dirs:
+        if not sd.exists():
+            log.warning(f"Shard directory not found: {sd}")
+            continue
+        shard_ckpt = CheckpointManager(sd)
+
+        for src, dest in [
+            ("image_mapping.json", merged_mapping),
+            ("step1_captions.json", merged_captions),
+            ("ui_only_images.json", merged_ui),
+            ("broken_images.json", merged_broken),
+            ("step2a_hooks.json", merged_hooks),
+            ("step3_final_assignment.json", merged_assignments),
+        ]:
+            data = shard_ckpt.load(src)
+            if data:
+                dest.update(data)
+                log.info(f"  {sd.name}/{src}: +{len(data)} entries")
+
+    ckpt.save(merged_mapping, "image_mapping.json")
+    ckpt.save(merged_captions, "step1_captions.json")
+    ckpt.save(merged_ui, "ui_only_images.json")
+    ckpt.save(merged_broken, "broken_images.json")
+    ckpt.save(merged_hooks, "step2a_hooks.json")
+    if merged_assignments:
+        ckpt.save(merged_assignments, "step3_final_assignment.json")
+
+    # Copy cluster definitions from first shard that has them
+    for sd in shard_dirs:
+        shard_ckpt = CheckpointManager(sd)
+        clusters = shard_ckpt.load("step2b_dynamic_clusters.json")
+        if clusters:
+            ckpt.save(clusters, "step2b_dynamic_clusters.json")
+            break
+
+    log.info("=" * 70)
+    log.info("Merge complete")
+    log.info(f"  Total images   : {len(merged_mapping)}")
+    log.info(f"  Valid captions : {len(merged_captions)}")
+    log.info(f"  Hooks          : {len(merged_hooks)}")
+    log.info(f"  Assignments    : {len(merged_assignments)}")
+    log.info(f"  Output         : {output_dir}")
+    log.info("=" * 70)
 
 
 # ---------------------------------------------------------------------------
@@ -1179,36 +1212,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     import os
     args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    log = setup_logging(args.output_dir / "logs", verbose=args.verbose)
 
-    # ── GPU selection: set CUDA_VISIBLE_DEVICES before any torch/vllm import ──
-    if args.gpu_ids is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
-        visible = args.gpu_ids.split(",")
-        log.info(f"CUDA_VISIBLE_DEVICES set to: {args.gpu_ids}  ({len(visible)} GPU(s))")
+    # ── Merge mode: combine shard results and exit ─────────────────────────
+    if args.merge_shards is not None:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        log = setup_logging(args.output_dir / "logs", verbose=args.verbose)
+        merge_shards(args.merge_shards, args.output_dir, log)
+        return
 
-    # ── Resolve unified vs separate mode ──────────────────────────────────
-    unified = args.llm_model == "unified"
+    # ── Normal shard processing mode ───────────────────────────────────────
+    if args.ads_dir is None:
+        print("ERROR: --ads_dir is required (unless using --merge_shards)")
+        sys.exit(1)
 
-    # ── Resolve tensor-parallel degrees ────────────────────────────────────
-    # Priority: explicit --vlm_tp / --llm_tp > --num_gpus > defaults
-    fallback_tp = args.num_gpus or 2
-    vlm_tp = args.vlm_tp if args.vlm_tp is not None else fallback_tp
-    llm_tp = args.llm_tp if args.llm_tp is not None else (args.num_gpus or 1)
+    # Resolve output directory with shard_id
+    actual_output = args.output_dir / args.shard_id if args.shard_id else args.output_dir
+    actual_output.mkdir(parents=True, exist_ok=True)
+    log = setup_logging(actual_output / "logs", verbose=args.verbose)
 
-    # ── Resolve per-model quantization ─────────────────────────────────────
-    vlm_quant = args.vlm_quantization or args.quantization
-    llm_quant = args.llm_quantization or args.quantization
+    # ── GPU selection ──────────────────────────────────────────────────────
+    if args.gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+        log.info(f"CUDA_VISIBLE_DEVICES set to: {args.gpu_id}")
 
-    # In unified mode, use the larger context window for text steps
-    if unified:
-        vlm_max_model_len = max(args.vlm_max_model_len, args.llm_max_model_len)
-    else:
-        vlm_max_model_len = args.vlm_max_model_len
-
-    # ── Force-clear checkpoints for specified steps ─────────────────────────
-    # Maps each step to the files that must be deleted to trigger a fresh run.
+    # ── Force-clear checkpoints for specified steps ────────────────────────
     _STEP_FILES = {
         "1":  ["step1_captions.json", "ui_only_images.json", "broken_images.json"],
         "2a": ["step2a_hooks.json"],
@@ -1218,14 +1245,14 @@ def main() -> None:
     if args.force_steps:
         for s in (s.strip() for s in args.force_steps.split(",")):
             for fname in _STEP_FILES.get(s, []):
-                fp = args.output_dir / fname
+                fp = actual_output / fname
                 if fp.exists():
                     fp.unlink()
                     log.info(f"  [force_steps] Deleted {fname} — step {s} will re-run")
 
-    # Graceful shutdown on SIGTERM / SIGINT
+    # Graceful shutdown
     def _shutdown(sig, frame):  # noqa: ANN001
-        del frame  # unused, required by signal handler signature
+        del frame
         log.warning(f"Signal {sig} received — checkpoints are safe, exiting cleanly.")
         sys.exit(0)
 
@@ -1233,25 +1260,18 @@ def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
 
     steps = {s.strip() for s in args.steps.split(",")}
-    ckpt = CheckpointManager(args.output_dir)
+    ckpt = CheckpointManager(actual_output)
 
     log.info("=" * 70)
-    log.info("ICTC Production Run")
-    log.info(f"  mode              : {'UNIFIED (single model)' if unified else 'SEPARATE (VLM + LLM)'}")
+    log.info("ICTC Single-GPU Shard Run")
+    log.info(f"  shard_id          : {args.shard_id or '(none)'}")
     log.info(f"  ads_dir           : {args.ads_dir}")
-    log.info(f"  output_dir        : {args.output_dir}")
+    log.info(f"  output_dir        : {actual_output}")
+    log.info(f"  image range       : [{args.start_index}, {args.end_index or 'end'})")
     log.info(f"  vlm_model         : {args.vlm_model}")
-    log.info(f"    tp={vlm_tp}  dtype={args.dtype}  quant={vlm_quant or 'none'}")
-    log.info(f"    max_model_len={vlm_max_model_len}  max_image_tokens={args.max_image_tokens}")
-    if unified:
-        log.info(f"  llm_model         : (unified — same as VLM)")
-    else:
-        log.info(f"  llm_model         : {args.llm_model}")
-        log.info(f"    tp={llm_tp}  dtype={args.dtype}  quant={llm_quant or 'none'}")
-        log.info(f"    max_model_len={args.llm_max_model_len}")
+    log.info(f"    tp=1  dtype={args.dtype}  quant={args.quantization or 'none'}")
+    log.info(f"    max_model_len={args.max_model_len}  max_image_tokens={args.max_image_tokens}")
     log.info(f"  gpu_util          : {args.gpu_util}")
-    log.info(f"  enforce_eager     : {args.enforce_eager}")
-    log.info(f"  swap_space        : {args.swap_space} GB")
     log.info(f"  num_clusters (K)  : {args.num_clusters}")
     log.info(f"  criterion         : {args.criterion}")
     log.info(f"  batch_vlm         : {args.batch_vlm}")
@@ -1260,19 +1280,25 @@ def main() -> None:
     log.info(f"  steps             : {args.steps}")
     log.info("=" * 70)
 
-    # -- Step 0: discover images (always runs) --------------------------------
+    # -- Step 0: discover images and apply shard range -------------------------
     if ckpt.exists("image_mapping.json"):
         image_mapping: Dict[str, dict] = ckpt.load("image_mapping.json")
         log.info(f"Resumed image_mapping.json ({len(image_mapping)} images)")
-        if args.max_images and len(image_mapping) > args.max_images:
-            keys = list(image_mapping.keys())[: args.max_images]
-            image_mapping = {k: image_mapping[k] for k in keys}
     else:
-        image_mapping = discover_images(args.ads_dir, args.max_images, log)
+        full_mapping = discover_images(args.ads_dir, max_images=None, log=log)
+        # Sort keys for deterministic sharding across VMs
+        sorted_keys = sorted(full_mapping.keys())
+        end_idx = args.end_index if args.end_index is not None else len(sorted_keys)
+        shard_keys = sorted_keys[args.start_index : end_idx]
+        image_mapping = {k: full_mapping[k] for k in shard_keys}
+        log.info(
+            f"Shard range [{args.start_index}:{end_idx}] — "
+            f"{len(image_mapping)} images (out of {len(full_mapping)} total)"
+        )
         ckpt.save(image_mapping, "image_mapping.json")
 
     if not image_mapping:
-        log.error("No images found — check --ads_dir")
+        log.error("No images in this shard range — check --start_index / --end_index")
         sys.exit(1)
 
     captions: Dict[str, dict] = {}
@@ -1283,191 +1309,96 @@ def main() -> None:
     vlm_needed_for_step1 = "1" in steps
     llm_steps_needed = any(s in steps for s in ["2a", "2b", "3"])
 
-    # ── Unified mode: one model handles everything ─────────────────────────
-    if unified:
-        # Load the model once, keep it for all steps
-        need_model = vlm_needed_for_step1 or llm_steps_needed
-        vlm = None
+    # ── Always unified: one model, single GPU ──────────────────────────────
+    vlm = None
+    need_model = vlm_needed_for_step1 or llm_steps_needed
 
-        if need_model:
-            # Check if Step 1 still has work
-            captions = ckpt.load("step1_captions.json") or {}
-            already_done_s1 = (
-                len(captions)
-                + len(ckpt.load("ui_only_images.json") or {})
-                + len(ckpt.load("broken_images.json") or {})
-            )
-            step1_already_complete = already_done_s1 >= len(image_mapping)
-
-            # Only load model if there's actual work to do
-            has_work = (vlm_needed_for_step1 and not step1_already_complete) or llm_steps_needed
-            if has_work:
-                vlm = VLMProcessor(
-                    model_name=args.vlm_model,
-                    tp=vlm_tp,
-                    max_model_len=vlm_max_model_len,
-                    max_image_tokens=args.max_image_tokens,
-                    gpu_util=args.gpu_util,
-                    dtype=args.dtype,
-                    quantization=vlm_quant,
-                    enforce_eager=args.enforce_eager,
-                    swap_space=args.swap_space,
-                    seed=args.seed,
-                    log=log,
-                )
-
-        # Step 1: VLM captioning (with images)
+    if need_model:
         captions = ckpt.load("step1_captions.json") or {}
-        if vlm_needed_for_step1:
-            already_done = (
-                len(captions)
-                + len(ckpt.load("ui_only_images.json") or {})
-                + len(ckpt.load("broken_images.json") or {})
-            )
-            if already_done < len(image_mapping):
-                captions = run_step1(
-                    image_mapping, ckpt, vlm,
-                    batch_size=args.batch_vlm,
-                    checkpoint_interval=args.ckpt_vlm,
-                    log=log,
-                )
-            else:
-                log.info(f"Step 1 already fully done ({len(captions)} valid captions loaded)")
-
-        if not captions:
-            captions = ckpt.load("step1_captions.json") or {}
-        if not captions:
-            log.error("No captions available. Run Step 1 first (include '1' in --steps).")
-            sys.exit(1)
-
-        # Steps 2a/2b/3: text-only (same model, no reload)
-        if llm_steps_needed:
-            log.info("Unified mode — reusing VLM for text steps (no model swap)")
-
-            if "2a" in steps:
-                hooks = run_step2a(
-                    captions, ckpt, vlm,
-                    batch_size=args.batch_llm,
-                    checkpoint_interval=args.ckpt_llm,
-                    log=log,
-                )
-            else:
-                hooks = ckpt.load("step2a_hooks.json") or {}
-
-            if "2b" in steps:
-                cluster_def = run_step2b(
-                    hooks, ckpt, vlm,
-                    num_clusters=args.num_clusters,
-                    top_n_hooks=args.top_hooks,
-                    criterion=args.criterion,
-                    log=log,
-                )
-            else:
-                cluster_def = ckpt.load("step2b_dynamic_clusters.json") or {}
-
-            if "3" in steps:
-                assignments = run_step3(
-                    captions, cluster_def, ckpt, vlm,
-                    batch_size=args.batch_llm,
-                    checkpoint_interval=args.ckpt_llm,
-                    log=log,
-                )
-            else:
-                assignments = ckpt.load("step3_final_assignment.json") or {}
-
-        if vlm is not None:
-            vlm.unload()
-            del vlm
-
-    # ── Separate mode: VLM for Step 1, then swap to LLM ────────────────────
-    else:
-        captions = ckpt.load("step1_captions.json") or {}
-
-        if vlm_needed_for_step1:
-            already_done = (
-                len(captions)
-                + len(ckpt.load("ui_only_images.json") or {})
-                + len(ckpt.load("broken_images.json") or {})
-            )
-            if already_done < len(image_mapping):
-                vlm = VLMProcessor(
-                    model_name=args.vlm_model,
-                    tp=vlm_tp,
-                    max_model_len=args.vlm_max_model_len,
-                    max_image_tokens=args.max_image_tokens,
-                    gpu_util=args.gpu_util,
-                    dtype=args.dtype,
-                    quantization=vlm_quant,
-                    enforce_eager=args.enforce_eager,
-                    swap_space=args.swap_space,
-                    seed=args.seed,
-                    log=log,
-                )
-                captions = run_step1(
-                    image_mapping, ckpt, vlm,
-                    batch_size=args.batch_vlm,
-                    checkpoint_interval=args.ckpt_vlm,
-                    log=log,
-                )
-                log.info("Unloading VLM to free GPU memory for LLM phase ...")
-                vlm.unload()
-                del vlm
-            else:
-                log.info(f"Step 1 already fully done ({len(captions)} valid captions loaded)")
-
-        if not captions:
-            captions = ckpt.load("step1_captions.json") or {}
-        if not captions:
-            log.error("No captions available. Run Step 1 first (include '1' in --steps).")
-            sys.exit(1)
-
-        if llm_steps_needed:
-            llm = LLMProcessor(
-                model_name=args.llm_model,
-                tp=llm_tp,
-                max_model_len=args.llm_max_model_len,
+        already_done_s1 = (
+            len(captions)
+            + len(ckpt.load("ui_only_images.json") or {})
+            + len(ckpt.load("broken_images.json") or {})
+        )
+        step1_already_complete = already_done_s1 >= len(image_mapping)
+        has_work = (vlm_needed_for_step1 and not step1_already_complete) or llm_steps_needed
+        if has_work:
+            vlm = VLMProcessor(
+                model_name=args.vlm_model,
+                tp=1,  # single GPU
+                max_model_len=args.max_model_len,
+                max_image_tokens=args.max_image_tokens,
                 gpu_util=args.gpu_util,
                 dtype=args.dtype,
-                quantization=llm_quant,
+                quantization=args.quantization,
                 enforce_eager=args.enforce_eager,
                 swap_space=args.swap_space,
                 seed=args.seed,
                 log=log,
             )
 
-            if "2a" in steps:
-                hooks = run_step2a(
-                    captions, ckpt, llm,
-                    batch_size=args.batch_llm,
-                    checkpoint_interval=args.ckpt_llm,
-                    log=log,
-                )
-            else:
-                hooks = ckpt.load("step2a_hooks.json") or {}
+    # Step 1
+    captions = ckpt.load("step1_captions.json") or {}
+    if vlm_needed_for_step1:
+        already_done = (
+            len(captions)
+            + len(ckpt.load("ui_only_images.json") or {})
+            + len(ckpt.load("broken_images.json") or {})
+        )
+        if already_done < len(image_mapping):
+            captions = run_step1(
+                image_mapping, ckpt, vlm,
+                batch_size=args.batch_vlm,
+                checkpoint_interval=args.ckpt_vlm,
+                log=log,
+            )
+        else:
+            log.info(f"Step 1 already fully done ({len(captions)} valid captions loaded)")
 
-            if "2b" in steps:
-                cluster_def = run_step2b(
-                    hooks, ckpt, llm,
-                    num_clusters=args.num_clusters,
-                    top_n_hooks=args.top_hooks,
-                    criterion=args.criterion,
-                    log=log,
-                )
-            else:
-                cluster_def = ckpt.load("step2b_dynamic_clusters.json") or {}
+    if not captions:
+        captions = ckpt.load("step1_captions.json") or {}
+    if not captions:
+        log.error("No captions available. Run Step 1 first (include '1' in --steps).")
+        sys.exit(1)
 
-            if "3" in steps:
-                assignments = run_step3(
-                    captions, cluster_def, ckpt, llm,
-                    batch_size=args.batch_llm,
-                    checkpoint_interval=args.ckpt_llm,
-                    log=log,
-                )
-            else:
-                assignments = ckpt.load("step3_final_assignment.json") or {}
+    # Steps 2a/2b/3 (same model, no reload)
+    if llm_steps_needed:
+        log.info("Unified mode — reusing model for text steps (no model swap)")
 
-            llm.unload()
-            del llm
+        if "2a" in steps:
+            hooks = run_step2a(
+                captions, ckpt, vlm,
+                batch_size=args.batch_llm,
+                checkpoint_interval=args.ckpt_llm,
+                log=log,
+            )
+        else:
+            hooks = ckpt.load("step2a_hooks.json") or {}
+
+        if "2b" in steps:
+            cluster_def = run_step2b(
+                hooks, ckpt, vlm,
+                num_clusters=args.num_clusters,
+                top_n_hooks=args.top_hooks,
+                criterion=args.criterion,
+                log=log,
+            )
+        else:
+            cluster_def = ckpt.load("step2b_dynamic_clusters.json") or {}
+
+        if "3" in steps:
+            assignments = run_step3(
+                captions, cluster_def, ckpt, vlm,
+                batch_size=args.batch_llm,
+                checkpoint_interval=args.ckpt_llm,
+                log=log,
+            )
+        else:
+            assignments = ckpt.load("step3_final_assignment.json") or {}
+
+    if vlm is not None:
+        vlm.unload()
+        del vlm
 
     # -- Export ----------------------------------------------------------------
     captions = captions or ckpt.load("step1_captions.json") or {}
@@ -1481,8 +1412,8 @@ def main() -> None:
         log.info("Skipping export (pipeline not fully complete yet)")
 
     log.info("=" * 70)
-    log.info("Pipeline finished.")
-    log.info(f"Results in: {args.output_dir}")
+    log.info("Shard finished.")
+    log.info(f"Results in: {actual_output}")
     log.info("=" * 70)
 
 

@@ -13,8 +13,10 @@ torch>=2.3.0
 torchvision>=0.18.0
 
 # ── HuggingFace stack ─────────────────────────────────────────────────────────
-# transformers 4.52+ has native Qwen3-VL support (no external utils needed).
-# For Qwen2.5-VL you need >=4.49; for older Qwen2-VL >=4.45 + qwen-vl-utils.
+# transformers 4.52+ has native Qwen3-VL support.
+# Qwen3.5-27B (default model) uses a GatedDeltaNet + sparse MoE architecture
+# with early-fusion multimodal support — requires transformers>=4.52 and
+# trust_remote_code=True (set automatically by the scripts).
 transformers>=4.52.0
 accelerate>=0.34.0
 huggingface_hub>=0.24.0
@@ -22,8 +24,10 @@ tokenizers>=0.21.0
 
 # ── vLLM — high-throughput inference engine ──────────────────────────────────
 # Handles tensor parallelism, continuous batching, PagedAttention.
-# Supports Qwen3-VL, Qwen2.5-VL, Llama 3.x, Mistral, and 40+ other families.
-# vLLM 0.6+ includes Qwen2.5-VL; 0.7+ includes Qwen3-VL.
+# Supports Qwen3.5-27B, Qwen3-VL, Qwen2.5-VL, Llama 3.x, Mistral, and 40+
+# other model families.
+# vLLM 0.7+ includes Qwen3-VL; Qwen3.5-27B uses trust_remote_code for
+# custom architecture layers (GatedDeltaNet).
 vllm>=0.7.0
 
 # ── Image handling ────────────────────────────────────────────────────────────
@@ -36,7 +40,12 @@ tqdm>=4.66.0
 # NOTES ON MODEL-SPECIFIC PACKAGES
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Qwen3-VL (default --vlm_model):
+# Qwen3.5-27B (default --vlm_model, unified mode):
+#   No extra packages needed — transformers>=4.52 + trust_remote_code handles
+#   the GatedDeltaNet layers.  Natively multimodal (early fusion) so it handles
+#   both image captioning (Step 1) and text reasoning (Steps 2a/2b/3).
+#
+# Qwen3-VL (--vlm_model Qwen/Qwen3-VL-*):
 #   No extra packages needed — transformers>=4.52 handles everything natively.
 #
 # Qwen2.5-VL (--vlm_model Qwen/Qwen2.5-VL-*):
