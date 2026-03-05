@@ -129,7 +129,10 @@ Return ONLY the exact strategy name from the list. Nothing else."""
 
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks and markdown code fences from model output."""
+    # Remove closed <think>...</think> blocks
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Remove unclosed <think> blocks (truncated responses)
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"```(?:json)?\s*\n?", "", text).strip()
     return text.strip("`").strip()
 
@@ -190,6 +193,8 @@ class CheckpointManager:
 def discover_images(
     ads_dir: Path,
     max_images: Optional[int] = None,
+    start_index: int = 0,
+    end_index: Optional[int] = None,
     log: Optional[logging.Logger] = None,
 ) -> Dict[str, dict]:
     """
@@ -199,6 +204,9 @@ def discover_images(
     Falls back to treating every .jpg/.png directly in ads_dir as an image,
     using the file stem as the observation_id.
 
+    When start_index/end_index are provided, only reads metadata for dirs
+    in the shard range (avoids scanning all dirs when only a slice is needed).
+
     Returns {observation_id: {image_path, platform, ad_format, timestamp}}
     """
     log = log or logging.getLogger("ictc")
@@ -206,8 +214,13 @@ def discover_images(
 
     subdirs = sorted(d for d in ads_dir.iterdir() if d.is_dir())
     if subdirs:
-        log.info(f"Found {len(subdirs)} subdirectories — using full_data.json structure")
-        for ad_dir in subdirs:
+        total = len(subdirs)
+        log.info(f"Found {total} subdirectories — using full_data.json structure")
+        # Slice to shard range BEFORE reading metadata (fast enumeration)
+        end = end_index if end_index is not None else total
+        selected = subdirs[start_index:end]
+        log.info(f"Shard range [{start_index}:{end}] — reading metadata for {len(selected)}/{total} dirs")
+        for ad_dir in selected:
             fd = ad_dir / "full_data.json"
             jpg_files = sorted(ad_dir.glob("*.jpg"))
             if not jpg_files:
@@ -243,7 +256,9 @@ def discover_images(
     else:
         log.info("No subdirectories — using flat image directory")
         all_imgs = sorted(ads_dir.glob("*.jpg")) + sorted(ads_dir.glob("*.png"))
-        for p in all_imgs:
+        end = end_index if end_index is not None else len(all_imgs)
+        selected_imgs = all_imgs[start_index:end]
+        for p in selected_imgs:
             mapping[p.stem] = {
                 "image_path": str(p),
                 "platform": "UNKNOWN",
@@ -256,7 +271,7 @@ def discover_images(
         mapping = {k: mapping[k] for k in keys}
         log.info(f"Capped at {max_images} images (--max_images)")
 
-    log.info(f"Total images to process: {len(mapping)}")
+    log.info(f"Total images in shard: {len(mapping)}")
     return mapping
 
 
@@ -365,7 +380,8 @@ class VLMProcessor:
             }
         ]
         return self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
 
     def process_batch(self, image_paths: List[Path]) -> List[dict]:
@@ -407,8 +423,19 @@ class VLMProcessor:
             outputs = self.llm.generate(inputs, self.sampling_params)
             return [self._parse_response(o.outputs[0].text, p) for o, p in zip(outputs, paths)]
         except Exception as exc:
-            self.log.error(f"vLLM generate error: {exc}")
-            return [_broken_entry(p) for p in paths]
+            self.log.warning(f"vLLM batch error ({len(images)} images): {exc}")
+            self.log.info("Falling back to per-image processing for this batch")
+            # Retry each image individually so only truly broken ones are skipped
+            results = []
+            for img, p in zip(images, paths):
+                try:
+                    single_input = [{"prompt": prompt_text, "multi_modal_data": {"image": img}}]
+                    out = self.llm.generate(single_input, self.sampling_params)
+                    results.append(self._parse_response(out[0].outputs[0].text, p))
+                except Exception as e2:
+                    self.log.warning(f"Skipping {p.name}: prompt too long or image error: {e2}")
+                    results.append(_broken_entry(p))
+            return results
 
     def _process_hf(self, images: list, paths: list) -> List[dict]:
         """Process one image at a time (HF Qwen batching with variable-size images is fragile)."""
@@ -427,7 +454,8 @@ class VLMProcessor:
                     }
                 ]
                 text = self.processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 device = next(self.model.parameters()).device
                 inputs = self.processor(text=[text], images=[img], return_tensors="pt").to(device)
@@ -478,7 +506,8 @@ class VLMProcessor:
             {"role": "user", "content": user},
         ]
         return self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
 
     def generate_batch(
@@ -577,7 +606,8 @@ class LLMProcessor:
     def _format_prompt(self, system: str, user: str) -> str:
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         return self.tokenizer.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=True
+            msgs, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
 
     def generate_batch(
@@ -785,7 +815,7 @@ def run_step2a(
 
         v_ids, v_texts = zip(*valid_pairs)
         raw_hooks = llm.generate_batch(
-            STEP2A_SYSTEM, list(v_texts), temperature=0.3, max_tokens=20
+            STEP2A_SYSTEM, list(v_texts), temperature=0.3, max_tokens=200
         )
 
         for obs_id, hook_raw, txt in zip(v_ids, raw_hooks, v_texts):
@@ -930,7 +960,7 @@ def run_step3(
 
         v_ids, v_texts = zip(*valid_pairs)
         responses = llm.generate_batch(
-            system_prompt, list(v_texts), temperature=0.2, max_tokens=30
+            system_prompt, list(v_texts), temperature=0.2, max_tokens=200
         )
 
         for obs_id, resp, txt in zip(v_ids, responses, v_texts):
@@ -1093,8 +1123,8 @@ def parse_args() -> argparse.Namespace:
                    help="Quantization format. Use 'fp8' to fit Qwen3.5-27B on A100-40GB.")
 
     # ── Context / image resolution ─────────────────────────────────────────
-    p.add_argument("--max_model_len", type=int, default=4096,
-                   help="Model context window (tokens). 4096 is fine for most ads. "
+    p.add_argument("--max_model_len", type=int, default=8192,
+                   help="Model context window (tokens). 8192 covers most ad images. "
                         "Increase for very long text. Larger = more VRAM.")
     p.add_argument("--max_image_tokens", type=int, default=1280,
                    help="Max image token budget per image. "
@@ -1285,15 +1315,9 @@ def main() -> None:
         image_mapping: Dict[str, dict] = ckpt.load("image_mapping.json")
         log.info(f"Resumed image_mapping.json ({len(image_mapping)} images)")
     else:
-        full_mapping = discover_images(args.ads_dir, max_images=None, log=log)
-        # Sort keys for deterministic sharding across VMs
-        sorted_keys = sorted(full_mapping.keys())
-        end_idx = args.end_index if args.end_index is not None else len(sorted_keys)
-        shard_keys = sorted_keys[args.start_index : end_idx]
-        image_mapping = {k: full_mapping[k] for k in shard_keys}
-        log.info(
-            f"Shard range [{args.start_index}:{end_idx}] — "
-            f"{len(image_mapping)} images (out of {len(full_mapping)} total)"
+        image_mapping = discover_images(
+            args.ads_dir, max_images=None,
+            start_index=args.start_index, end_index=args.end_index, log=log,
         )
         ckpt.save(image_mapping, "image_mapping.json")
 

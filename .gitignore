@@ -1,0 +1,7 @@
+# SSH keys
+*.pem
+uq_aio.pem
+
+# Python cache
+__pycache__/
+*.pyc

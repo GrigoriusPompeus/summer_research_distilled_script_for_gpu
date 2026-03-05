@@ -240,7 +240,7 @@ Key differences from multi-GPU version:
 | `--shard_id` | *(none)* | Shard subdirectory name (e.g. `shard_0`) |
 | `--merge_shards` | *(none)* | Merge mode: pass shard directory paths |
 | `--gpu_id` | *(auto)* | Single CUDA device ID (e.g. `"0"`) |
-| `--max_model_len` | `4096` | Single context window (no separate vlm/llm) |
+| `--max_model_len` | `8192` | Single context window (no separate vlm/llm) |
 | `--batch_vlm` | `4` | Lower default for single GPU |
 | `--batch_llm` | `64` | Lower default for single GPU |
 | `--ckpt_vlm` | `500` | More frequent checkpointing |
@@ -381,6 +381,96 @@ Use `run_ictc.sh` which wraps everything in a **tmux session**:
 tmux attach -t ictc
 tail -f /data/out/logs/ictc_*.log
 ```
+
+---
+
+## Deployment: UQ AIO Server (A100-40GB)
+
+### Server Details
+
+| Field | Value |
+|-------|-------|
+| Host | `<USERNAME>@<SERVER_IP>` |
+| SSH | `ssh -i <SSH_KEY>.pem <USERNAME>@<SERVER_IP>` |
+| GPU | NVIDIA A100 PCIe 40GB |
+| RAM | 590 GB |
+| Storage | 3.6 TB NVMe at `/mnt/nvme0n1/` |
+| Dataset | 86,446 ads at `/mnt/nvme0n1/data/output/exported-data/ads/` |
+| Python env | `~/ictc_env/` (venv, Python 3.10) |
+| Model cache | `/mnt/nvme0n1/cache/huggingface/` (root disk too small at 30GB) |
+
+### What Was Set Up (2026-03-05)
+
+1. **NVIDIA drivers**: Installed `nvidia-driver-570` (CUDA 12.8 support). Blacklisted `nouveau` (unused on this VM — display via `virtio_gpu`). Disabled MIG mode (`nvidia-smi -mig 0`).
+
+2. **Python environment**: Created `~/ictc_env` venv. Installed vLLM nightly (`0.16.1rc1.dev258`) — required for Qwen 3.5 support (stable vLLM 0.16.0 doesn't recognize `Qwen3_5ForConditionalGeneration`). PyTorch 2.10.0+cu129, transformers 4.57.6.
+
+3. **Model**: Using **Qwen/Qwen3.5-9B** in bf16 (~18GB VRAM). The 27B default doesn't fit on A100-40GB in bf16 (~54GB), and FP8 quantization fails on A100 (compute 8.0 lacks native FP8 — Marlin kernel fallback has tile alignment issues with Qwen 3.5 dimensions).
+
+### Code Changes for Qwen 3.5 Compatibility
+
+**Thinking mode fix** — Qwen 3.5 is a chain-of-thought model that outputs `<think>` reasoning blocks by default. Without suppression, all pipeline steps return the model's internal reasoning instead of the requested output (e.g., Step 2a hooks all come back as "thinking process:" instead of marketing hooks).
+
+Fix: Added `enable_thinking=False` to **all 4** `apply_chat_template()` call sites:
+
+| Location | Line | Purpose |
+|----------|------|---------|
+| `VLMProcessor._fmt_prompt()` | Step 1 VLM captioning (vLLM path) |
+| `VLMProcessor._process_hf()` | Step 1 VLM captioning (HF fallback) |
+| `VLMProcessor._format_text_prompt()` | Steps 2a, 2b, 3 (unified mode text generation) |
+| `LLMProcessor._format_prompt()` | Steps 2a, 2b, 3 (standalone LLM path) |
+
+**Directory scan optimization** — `discover_images()` now accepts `start_index`/`end_index` parameters. It enumerates all subdirectory names (fast `iterdir`), slices to the shard range, then only reads `full_data.json` for the selected directories. Previously it read metadata from all 86,446 dirs before slicing (~2.5 min wasted for small test runs).
+
+**`_strip_thinking()` hardening** — Added handling for unclosed `<think>` blocks (truncated model responses), in addition to closed `<think>...</think>` blocks.
+
+**`max_tokens` increases** — Step 2a: 20→200, Step 3: 30→200 (Qwen 3.5 needs more tokens than Qwen 2.5 for the same tasks).
+
+**`max_model_len` increase (4096→8192)** — Image + text prompt tokens for some ads exceed 4096 (observed 4152–4252 tokens). Raised the default to 8192 in both `ictc_cluster_single_gpu.py` and `run_ictc_single_gpu.sh`. The 9B model in bf16 (~18GB) leaves plenty of VRAM headroom on A100-40GB for the larger context.
+
+**Per-image fallback in `_process_vllm()`** — When a vLLM batch fails (e.g., one oversized image exceeds `max_model_len`), the code now retries each image individually instead of marking the entire batch as BROKEN. Only the single problematic image is skipped, so the pipeline keeps making progress.
+
+### Running the Production Job
+
+```bash
+# SSH in
+ssh -i <SSH_KEY>.pem <USERNAME>@<SERVER_IP>
+
+# Check if the job is running
+tmux attach -t ictc          # Ctrl+B then D to detach
+
+# Or tail the log
+tail -f /mnt/nvme0n1/data/output/ictc_production/full_run/logs/ictc_*.log
+
+# Results will be at
+/mnt/nvme0n1/data/output/ictc_production/full_run/ictc_final_results.json
+```
+
+The launcher script `run_ictc_single_gpu.sh` is also on the server at `~/run_ictc_single_gpu.sh` for future runs.
+
+### If You Need to Re-run or Change Criteria
+
+```bash
+# Resume after crash (just re-run — checkpoints auto-resume)
+source ~/ictc_env/bin/activate
+HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu.py \
+  --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
+  --output_dir /mnt/nvme0n1/data/output/ictc_production \
+  --shard_id full_run --vlm_model Qwen/Qwen3.5-9B --verbose
+
+# Re-cluster with different criterion (reuses Step 1 captions — fast)
+HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu.py \
+  --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
+  --output_dir /mnt/nvme0n1/data/output/ictc_production \
+  --shard_id full_run --vlm_model Qwen/Qwen3.5-9B \
+  --criterion "Emotional Tone" --steps 2b,3 --verbose
+```
+
+### Known Limitations on This Server
+
+- **FP8 quantization not supported**: A100 is compute capability 8.0, needs 8.9+ for native FP8. The Marlin fallback kernel crashes on Qwen 3.5's layer dimensions.
+- **Root disk is 30GB**: All large files (model cache, outputs) must go to `/mnt/nvme0n1/`. Always set `HF_HOME=/mnt/nvme0n1/cache/huggingface`.
+- **vLLM nightly required**: Stable vLLM (0.16.0) doesn't support Qwen 3.5. If you reinstall packages, use: `uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly`
 
 ---
 
