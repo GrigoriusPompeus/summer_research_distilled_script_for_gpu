@@ -11,25 +11,41 @@ Based on **Experiment 3B** findings: a single Qwen 3.5 model handles both vision
 | File | Description |
 |------|-------------|
 | `ictc_cluster.py` | **Multi-GPU production pipeline** — unified or separate model modes, tensor parallelism, full crash resume |
-| `ictc_cluster_single_gpu.py` | **Single-GPU shard script** — horizontal scaling across VMs, merge results after |
+| `ictc_cluster_single_gpu.py` | **Single-GPU shard script (Track 1)** — Marketing Strategy prompts, horizontal scaling across VMs |
+| `ictc_cluster_single_gpu_track2.py` | **Single-GPU shard script (Track 2)** — Algorithmic Identity & Profiling prompts |
 | `run_ictc.sh` | tmux wrapper for SSH-resilient execution on cluster nodes |
+| `run_ictc_single_gpu.sh` | tmux wrapper for Track 1 single-GPU runs |
+| `run_ictc_track2.sh` | tmux wrapper for Track 2 single-GPU runs (session: `ictc_t2`) |
 | `requirements_cluster.txt` | pip dependencies (torch, vLLM, transformers, pillow, tqdm) |
 
 ---
 
 ## Pipeline
 
+The pipeline has 4 steps, shared across all tracks. Only the **prompts** differ between tracks:
+
 ```
 Step 0  Discovery   Scan dataset, build image map
-Step 1  VLM         Qwen3.5-27B captions each image → {category, brand, text, summary}
-Step 2a Text        Same model extracts 2-4 word "marketing hook" per ad
-Step 2b Text        Same model synthesizes top hooks → K cluster definitions  (single call)
+Step 1  VLM         Qwen3.5 captions each image → {category, brand, text, summary}
+Step 2a Text        Same model extracts a 2-4 word label per ad
+Step 2b Text        Same model synthesizes top labels → K cluster definitions  (single call)
 Step 3  Text        Same model assigns each ad to its best-fitting cluster
 ```
 
 Default model: **Qwen/Qwen3.5-27B** — natively multimodal (early fusion), handles all steps without model swap.
 
 Legacy mode: pass `--llm_model <model_id>` to use a separate LLM for Steps 2a/2b/3 (multi-GPU script only).
+
+### Prompt Tracks
+
+| Track | Script | Criterion | What Step 1 Extracts | Step 2a Label |
+|-------|--------|-----------|----------------------|---------------|
+| **Track 1** — Marketing Strategy | `ictc_cluster_single_gpu.py` | `Marketing Strategy` | Generic ad description (brand, text, visual summary) | "marketing hook" (e.g., "scarcity urgency") |
+| **Track 2** — Algorithmic Identity | `ictc_cluster_single_gpu_track2.py` | `Algorithmic Identity Profiling` | "Assumed User Identity" — socio-economic status, gender performance, cultural signals, lifestyle the ad assumes the viewer has | "algorithmic persona" (e.g., "hustle-culture tech bro") |
+
+Track 2 is designed for researching the **"Data Double"** — what kind of demographic buckets the algorithm places individuals into based on the ads they are shown. The Step 2b prompt adopts the role of a *Critical Data Scholar* researching surveillance capitalism and algorithmic identity profiling.
+
+Both tracks share the same pipeline logic, checkpoint system, and CLI flags. They differ **only in the prompt constants** at the top of each script.
 
 ---
 
@@ -110,6 +126,34 @@ Sharding is deterministic: all VMs discover the full image set, sort keys identi
 
 ---
 
+## Script 3: `ictc_cluster_single_gpu_track2.py` — Track 2: Algorithmic Identity
+
+Same pipeline as Track 1, but with **identity-focused prompts** analyzing who the algorithm thinks is watching each ad.
+
+```bash
+# Full run — uses same images as Track 1, separate output directory
+python ictc_cluster_single_gpu_track2.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --shard_id track2_identity
+
+# Or use the tmux wrapper (creates session "ictc_t2")
+chmod +x run_ictc_track2.sh
+./run_ictc_track2.sh
+```
+
+**Track 2 prompt differences:**
+
+| Stage | Track 1 (Marketing) | Track 2 (Identity) |
+|-------|---------------------|---------------------|
+| Step 1 | Generic `visual_summary` | Analyzes "Assumed User Identity" — socio-economic status, gender, cultural signals |
+| Step 2a | Extracts "marketing hook" | Extracts "algorithmic persona" (e.g., "exhausted millennial parent") |
+| Step 2b | Expert analyst → marketing strategy clusters | Critical Data Scholar → algorithmic identity clusters |
+| Step 3 | Assigns to strategy | Assigns to identity cluster |
+
+**Isolation**: Track 2 results go to `output_dir/track2_identity/`, completely separate from Track 1's `full_run/`. Both can coexist on the same server. The tmux session is named `ictc_t2` (vs `ictc` for Track 1) so both can run simultaneously if GPU memory allows.
+
+---
+
 ## Input Data Format
 
 The scripts support two layouts:
@@ -144,8 +188,8 @@ All outputs go to `--output_dir` (or `--output_dir/<shard_id>/` for single-GPU s
 | `step1_captions.json` | Step 1: VLM captions for valid ads |
 | `ui_only_images.json` | Step 1: images classified as UI/interface screens |
 | `broken_images.json` | Step 1: broken/unreadable images |
-| `step2a_hooks.json` | Step 2a: 2-4 word marketing hook per ad |
-| `step2b_dynamic_clusters.json` | Step 2b: K cluster definitions |
+| `step2a_hooks.json` | Step 2a: 2-4 word label per ad (marketing hook or algorithmic persona, depending on track) |
+| `step2b_dynamic_clusters.json` | Step 2b: K cluster definitions (strategy clusters or identity clusters) |
 | `step3_final_assignment.json` | Step 3: cluster assignment per ad |
 | `step2b_metadata.json` | Step 2b cache key (num_clusters + criterion) |
 | `step3_metadata.json` | Step 3 cache key (cluster names used for assignment) |
@@ -315,6 +359,12 @@ python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \
 python ictc_cluster_single_gpu.py --merge_shards \
   /data/out/shard_0 /data/out/shard_1 --output_dir /data/out/merged
 
+# ── Track 2: Algorithmic Identity & Profiling (same images, different prompts)─
+python ictc_cluster_single_gpu_track2.py --ads_dir /data/ads --output_dir /data/out \
+  --shard_id track2_identity
+# Or via tmux wrapper:
+./run_ictc_track2.sh
+
 # ── Use only GPUs 2 and 3 on a shared node ───────────────────────────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
@@ -430,35 +480,49 @@ Fix: Added `enable_thinking=False` to **all 4** `apply_chat_template()` call sit
 
 **Per-image fallback in `_process_vllm()`** — When a vLLM batch fails (e.g., one oversized image exceeds `max_model_len`), the code now retries each image individually instead of marking the entire batch as BROKEN. Only the single problematic image is skipped, so the pipeline keeps making progress.
 
-### Running the Production Job
+### Running Production Jobs
 
 ```bash
 # SSH in
 ssh -i <SSH_KEY>.pem <USERNAME>@<SERVER_IP>
 
+# ── Track 1 (Marketing Strategy) — completed ────────────────────────────────
+# Results at:
+/mnt/nvme0n1/data/output/ictc_production/full_run/ictc_final_results.json
+
+# ── Track 2 (Algorithmic Identity) ──────────────────────────────────────────
 # Check if the job is running
-tmux attach -t ictc          # Ctrl+B then D to detach
+tmux attach -t ictc_t2       # Ctrl+B then D to detach
 
 # Or tail the log
-tail -f /mnt/nvme0n1/data/output/ictc_production/full_run/logs/ictc_*.log
+tail -f /mnt/nvme0n1/data/output/ictc_production/track2_identity/logs/ictc_*.log
 
-# Results will be at
-/mnt/nvme0n1/data/output/ictc_production/full_run/ictc_final_results.json
+# Results will be at:
+/mnt/nvme0n1/data/output/ictc_production/track2_identity/ictc_final_results.json
 ```
 
-The launcher script `run_ictc_single_gpu.sh` is also on the server at `~/run_ictc_single_gpu.sh` for future runs.
+Launcher scripts on the server:
+- `~/run_ictc_single_gpu.sh` — Track 1 (tmux session: `ictc`)
+- `~/run_ictc_track2.sh` — Track 2 (tmux session: `ictc_t2`)
 
 ### If You Need to Re-run or Change Criteria
 
 ```bash
-# Resume after crash (just re-run — checkpoints auto-resume)
 source ~/ictc_env/bin/activate
+
+# Resume Track 1 after crash (checkpoints auto-resume)
 HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu.py \
   --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
   --output_dir /mnt/nvme0n1/data/output/ictc_production \
   --shard_id full_run --vlm_model Qwen/Qwen3.5-9B --verbose
 
-# Re-cluster with different criterion (reuses Step 1 captions — fast)
+# Resume Track 2 after crash
+HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu_track2.py \
+  --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
+  --output_dir /mnt/nvme0n1/data/output/ictc_production \
+  --shard_id track2_identity --vlm_model Qwen/Qwen3.5-9B --verbose
+
+# Re-cluster Track 1 with different criterion (reuses Step 1 captions — fast)
 HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu.py \
   --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
   --output_dir /mnt/nvme0n1/data/output/ictc_production \
