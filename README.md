@@ -13,9 +13,11 @@ Based on **Experiment 3B** findings: a single Qwen 3.5 model handles both vision
 | `ictc_cluster.py` | **Multi-GPU production pipeline** — unified or separate model modes, tensor parallelism, full crash resume |
 | `ictc_cluster_single_gpu.py` | **Single-GPU shard script (Track 1)** — Marketing Strategy prompts, horizontal scaling across VMs |
 | `ictc_cluster_single_gpu_track2.py` | **Single-GPU shard script (Track 2)** — Algorithmic Identity & Profiling prompts |
+| `ictc_cluster_single_gpu_track3.py` | **Single-GPU shard script (Track 3)** — Cultural Representation & Social Values prompts |
 | `run_ictc.sh` | tmux wrapper for SSH-resilient execution on cluster nodes |
 | `run_ictc_single_gpu.sh` | tmux wrapper for Track 1 single-GPU runs |
 | `run_ictc_track2.sh` | tmux wrapper for Track 2 single-GPU runs (session: `ictc_t2`) |
+| `run_ictc_track3.sh` | tmux wrapper for Track 3 single-GPU runs (session: `ictc_t3`) |
 | `requirements_cluster.txt` | pip dependencies (torch, vLLM, transformers, pillow, tqdm) |
 
 ---
@@ -28,7 +30,7 @@ The pipeline has 4 steps, shared across all tracks. Only the **prompts** differ 
 Step 0  Discovery   Scan dataset, build image map
 Step 1  VLM         Qwen3.5 captions each image → {category, brand, text, summary}
 Step 2a Text        Same model extracts a 2-4 word label per ad
-Step 2b Text        Same model synthesizes top labels → K cluster definitions  (single call)
+Step 2b Text        Same model synthesises top labels → K cluster definitions  (single call)
 Step 3  Text        Same model assigns each ad to its best-fitting cluster
 ```
 
@@ -42,10 +44,13 @@ Legacy mode: pass `--llm_model <model_id>` to use a separate LLM for Steps 2a/2b
 |-------|--------|-----------|----------------------|---------------|
 | **Track 1** — Marketing Strategy | `ictc_cluster_single_gpu.py` | `Marketing Strategy` | Generic ad description (brand, text, visual summary) | "marketing hook" (e.g., "scarcity urgency") |
 | **Track 2** — Algorithmic Identity | `ictc_cluster_single_gpu_track2.py` | `Algorithmic Identity Profiling` | "Assumed User Identity" — socio-economic status, gender performance, cultural signals, lifestyle the ad assumes the viewer has | "algorithmic persona" (e.g., "hustle-culture tech bro") |
+| **Track 3** — Cultural Representation | `ictc_cluster_single_gpu_track3.py` | `Cultural Representation & Social Values` | Cultural content & representation — people shown, settings, lifestyles portrayed, values/aspirations communicated, aesthetic and tone | "cultural theme" (e.g., "aspirational wealth display") |
 
 Track 2 is designed for researching the **"Data Double"** — what kind of demographic buckets the algorithm places individuals into based on the ads they are shown. The Step 2b prompt adopts the role of a *Critical Data Scholar* researching surveillance capitalism and algorithmic identity profiling.
 
-Both tracks share the same pipeline logic, checkpoint system, and CLI flags. They differ **only in the prompt constants** at the top of each script.
+Track 3 is designed for studying how advertising reflects and constructs **cultural narratives and social values**. It enables research on identity, representation, consumer culture, and social norms — what lifestyles and identities ads promote as desirable, what cultural values are embedded, and how ads shape norms around gender, class, health, or success. The Step 2b prompt adopts the role of a *Cultural Studies Researcher*.
+
+All tracks share the same pipeline logic, checkpoint system, and CLI flags. They differ **only in the prompt constants** at the top of each script.
 
 ---
 
@@ -145,12 +150,40 @@ chmod +x run_ictc_track2.sh
 
 | Stage | Track 1 (Marketing) | Track 2 (Identity) |
 |-------|---------------------|---------------------|
-| Step 1 | Generic `visual_summary` | Analyzes "Assumed User Identity" — socio-economic status, gender, cultural signals |
+| Step 1 | Generic `visual_summary` | Analyses "Assumed User Identity" — socio-economic status, gender, cultural signals |
 | Step 2a | Extracts "marketing hook" | Extracts "algorithmic persona" (e.g., "exhausted millennial parent") |
 | Step 2b | Expert analyst → marketing strategy clusters | Critical Data Scholar → algorithmic identity clusters |
 | Step 3 | Assigns to strategy | Assigns to identity cluster |
 
 **Isolation**: Track 2 results go to `output_dir/track2_identity/`, completely separate from Track 1's `full_run/`. Both can coexist on the same server. The tmux session is named `ictc_t2` (vs `ictc` for Track 1) so both can run simultaneously if GPU memory allows.
+
+---
+
+## Script 4: `ictc_cluster_single_gpu_track3.py` — Track 3: Cultural Representation
+
+Same pipeline as Tracks 1 & 2, but with **culture-focused prompts** analyzing cultural content, representation, and social values embedded in ads.
+
+```bash
+# Full run — uses same images as Tracks 1 & 2, separate output directory
+python ictc_cluster_single_gpu_track3.py \
+  --ads_dir /data/ads --output_dir /data/out \
+  --shard_id track3_cultural
+
+# Or use the tmux wrapper (creates session "ictc_t3")
+chmod +x run_ictc_track3.sh
+./run_ictc_track3.sh
+```
+
+**Track 3 prompt differences:**
+
+| Stage | Track 1 (Marketing) | Track 3 (Cultural) |
+|-------|---------------------|---------------------|
+| Step 1 | Generic `visual_summary` | Cultural content & representation — people, settings, lifestyles, values, aesthetic tone |
+| Step 2a | Extracts "marketing hook" | Extracts "cultural theme" (e.g., "aspirational wealth display") |
+| Step 2b | Expert analyst → marketing strategy clusters | Cultural Studies Researcher → cultural value categories |
+| Step 3 | Assigns to strategy | Assigns to cultural category |
+
+**Isolation**: Track 3 results go to `output_dir/track3_cultural/`, completely separate from Tracks 1 and 2. The tmux session is named `ictc_t3` so all three tracks can run sequentially on the same GPU.
 
 ---
 
@@ -220,7 +253,7 @@ All outputs go to `--output_dir` (or `--output_dir/<shard_id>/` for single-GPU s
 | `--vlm_tp` | *(from num_gpus or 2)* | Tensor-parallel degree for VLM |
 | `--llm_tp` | *(from num_gpus or 1)* | Tensor-parallel degree for LLM (separate mode) |
 | `--gpu_ids` | *(all visible)* | CUDA device IDs, e.g. `"0,1"` or `"2,3"` |
-| `--gpu_util` | `0.90` | vLLM memory utilization per GPU (0.0–1.0) |
+| `--gpu_util` | `0.90` | vLLM memory utilisation per GPU (0.0–1.0) |
 
 ### Precision & Quantization
 | Flag | Default | Description |
@@ -365,6 +398,12 @@ python ictc_cluster_single_gpu_track2.py --ads_dir /data/ads --output_dir /data/
 # Or via tmux wrapper:
 ./run_ictc_track2.sh
 
+# ── Track 3: Cultural Representation & Social Values ─────────────────────────
+python ictc_cluster_single_gpu_track3.py --ads_dir /data/ads --output_dir /data/out \
+  --shard_id track3_cultural
+# Or via tmux wrapper:
+./run_ictc_track3.sh
+
 # ── Use only GPUs 2 and 3 on a shared node ───────────────────────────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
@@ -453,7 +492,7 @@ tail -f /data/out/logs/ictc_*.log
 
 1. **NVIDIA drivers**: Installed `nvidia-driver-570` (CUDA 12.8 support). Blacklisted `nouveau` (unused on this VM — display via `virtio_gpu`). Disabled MIG mode (`nvidia-smi -mig 0`).
 
-2. **Python environment**: Created `~/ictc_env` venv. Installed vLLM nightly (`0.16.1rc1.dev258`) — required for Qwen 3.5 support (stable vLLM 0.16.0 doesn't recognize `Qwen3_5ForConditionalGeneration`). PyTorch 2.10.0+cu129, transformers 4.57.6.
+2. **Python environment**: Created `~/ictc_env` venv. Installed vLLM nightly (`0.16.1rc1.dev258`) — required for Qwen 3.5 support (stable vLLM 0.16.0 doesn't recognise `Qwen3_5ForConditionalGeneration`). PyTorch 2.10.0+cu129, transformers 4.57.6.
 
 3. **Model**: Using **Qwen/Qwen3.5-9B** in bf16 (~18GB VRAM). The 27B default doesn't fit on A100-40GB in bf16 (~54GB), and FP8 quantization fails on A100 (compute 8.0 lacks native FP8 — Marlin kernel fallback has tile alignment issues with Qwen 3.5 dimensions).
 
@@ -470,7 +509,7 @@ Fix: Added `enable_thinking=False` to **all 4** `apply_chat_template()` call sit
 | `VLMProcessor._format_text_prompt()` | Steps 2a, 2b, 3 (unified mode text generation) |
 | `LLMProcessor._format_prompt()` | Steps 2a, 2b, 3 (standalone LLM path) |
 
-**Directory scan optimization** — `discover_images()` now accepts `start_index`/`end_index` parameters. It enumerates all subdirectory names (fast `iterdir`), slices to the shard range, then only reads `full_data.json` for the selected directories. Previously it read metadata from all 86,446 dirs before slicing (~2.5 min wasted for small test runs).
+**Directory scan optimisation** — `discover_images()` now accepts `start_index`/`end_index` parameters. It enumerates all subdirectory names (fast `iterdir`), slices to the shard range, then only reads `full_data.json` for the selected directories. Previously it read metadata from all 86,446 dirs before slicing (~2.5 min wasted for small test runs).
 
 **`_strip_thinking()` hardening** — Added handling for unclosed `<think>` blocks (truncated model responses), in addition to closed `<think>...</think>` blocks.
 
@@ -486,24 +525,27 @@ Fix: Added `enable_thinking=False` to **all 4** `apply_chat_template()` call sit
 # SSH in
 ssh -i <SSH_KEY>.pem <USERNAME>@<SERVER_IP>
 
-# ── Track 1 (Marketing Strategy) — completed ────────────────────────────────
+# ── Track 1 (Marketing Strategy) ─────────────────────────────────────────────
 # Results at:
 /mnt/nvme0n1/data/output/ictc_production/full_run/ictc_final_results.json
 
-# ── Track 2 (Algorithmic Identity) ──────────────────────────────────────────
-# Check if the job is running
+# ── Track 2 (Algorithmic Identity) ───────────────────────────────────────────
 tmux attach -t ictc_t2       # Ctrl+B then D to detach
-
-# Or tail the log
 tail -f /mnt/nvme0n1/data/output/ictc_production/track2_identity/logs/ictc_*.log
-
-# Results will be at:
+# Results at:
 /mnt/nvme0n1/data/output/ictc_production/track2_identity/ictc_final_results.json
+
+# ── Track 3 (Cultural Representation) ────────────────────────────────────────
+tmux attach -t ictc_t3       # Ctrl+B then D to detach
+tail -f /mnt/nvme0n1/data/output/ictc_production/track3_cultural/logs/ictc_*.log
+# Results at:
+/mnt/nvme0n1/data/output/ictc_production/track3_cultural/ictc_final_results.json
 ```
 
 Launcher scripts on the server:
 - `~/run_ictc_single_gpu.sh` — Track 1 (tmux session: `ictc`)
 - `~/run_ictc_track2.sh` — Track 2 (tmux session: `ictc_t2`)
+- `~/run_ictc_track3.sh` — Track 3 (tmux session: `ictc_t3`)
 
 ### If You Need to Re-run or Change Criteria
 
@@ -521,6 +563,12 @@ HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu_track2.
   --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
   --output_dir /mnt/nvme0n1/data/output/ictc_production \
   --shard_id track2_identity --vlm_model Qwen/Qwen3.5-9B --verbose
+
+# Resume Track 3 after crash
+HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu_track3.py \
+  --ads_dir /mnt/nvme0n1/data/output/exported-data/ads \
+  --output_dir /mnt/nvme0n1/data/output/ictc_production \
+  --shard_id track3_cultural --vlm_model Qwen/Qwen3.5-9B --verbose
 
 # Re-cluster Track 1 with different criterion (reuses Step 1 captions — fast)
 HF_HOME=/mnt/nvme0n1/cache/huggingface python3 ~/ictc_cluster_single_gpu.py \

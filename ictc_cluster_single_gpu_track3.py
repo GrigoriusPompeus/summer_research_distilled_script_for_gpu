@@ -1,43 +1,27 @@
 #!/usr/bin/env python3
 """
-ICTC VLM Clustering — Single-GPU Shard Script (Unified Qwen 3.5)
+ICTC VLM Clustering — Track 3: Cultural Representation & Social Values
 ===================================================================
-Runs the ICTC pipeline on a SINGLE GPU, processing a specific range of
-images.  Designed for horizontal scaling: run multiple instances on
-separate VMs (each with 1 GPU), then merge the shard results.
+Single-GPU shard script (Unified Qwen 3.5) — TRACK 3 PROMPTS
+
+Studies how advertising reflects and constructs cultural narratives,
+social values, and visions of "the good life." Enables research on
+identity, representation, consumer culture, and social norms.
 
 Pipeline (always unified — single model for all steps):
   Step 0  — Discover images, select shard range [start_index, end_index)
-  Step 1  — Qwen3.5 captioning     : image -> JSON {category, brand, text, description}
-  Step 2a — Same model (text-only)  : extract 2-4 word marketing hook per ad
-  Step 2b — Same model (text-only)  : synthesise K cluster definitions from top hooks
-  Step 3  — Same model (text-only)  : assign each ad -> best cluster
+  Step 1  — VLM extraction   : analyse cultural content & representation per ad
+  Step 2a — Theme extraction  : extract 2-4 word cultural theme per ad
+  Step 2b — Cluster synthesis : synthesise K "Cultural Value Categories"
+  Step 3  — Assignment        : assign each ad -> best cultural category
 
-Sharding example (200k images across 4 single-GPU VMs):
-  # VM 1:
-  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
-    --start_index 0 --end_index 50000 --shard_id shard_0
-
-  # VM 2:
-  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
-    --start_index 50000 --end_index 100000 --shard_id shard_1
-
-  # VM 3:
-  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
-    --start_index 100000 --end_index 150000 --shard_id shard_2
-
-  # VM 4:
-  python ictc_cluster_single_gpu.py --ads_dir /data/ads --output_dir /data/out \\
-    --start_index 150000 --end_index 200000 --shard_id shard_3
-
-Merging shards after all VMs finish:
-  python ictc_cluster_single_gpu.py --merge_shards \\
-    /data/out/shard_0 /data/out/shard_1 /data/out/shard_2 /data/out/shard_3 \\
-    --output_dir /data/out/merged
+Usage:
+  python ictc_cluster_single_gpu_track3.py \
+    --ads_dir /data/ads --output_dir /data/out --shard_id track3_cultural
 
 GPU memory guide (single GPU, bfloat16):
   Model                  VRAM    Notes
-  ─────────────────────────────────────────────────────────────
+  —————————————————————————————————————————————————
   Qwen3.5-27B           ~54 GB  A100-80GB / H100-80GB  <- default
   Qwen3.5-27B-FP8       ~27 GB  A100-40GB / A6000-48GB
   Qwen2.5-VL-7B         ~14 GB  L4 / T4 / A10
@@ -61,20 +45,20 @@ from typing import Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
-# PROMPTS  (identical to the notebook so results are comparable)
+# PROMPTS  (Track 3: Cultural Representation & Social Values)
 # ---------------------------------------------------------------------------
 
-STEP1_PROMPT = """Analyze this image for an ad database. Return a valid JSON object.
+STEP1_PROMPT = """Analyze this image for a cultural studies research project on advertising. Return a valid JSON object.
 
 ### STEP 1: CLASSIFY
-Determine the image category:
-- "ADVERTISEMENT": A clear, valid commercial ad.
-- "UI_ONLY": Social media feed, settings menu, or app interface with NO specific ad.
-- "BROKEN": Black screen, loading spinner, error message, or system lock screen.
+Determine the image category: "ADVERTISEMENT" | "UI_ONLY" | "BROKEN".
 
 ### STEP 2: DESCRIBE
-- If "ADVERTISEMENT": Extract brand_name, main_text, and a visual_summary.
-- If "UI_ONLY" or "BROKEN": Leave description fields null or empty.
+- If "ADVERTISEMENT": Describe the ad with a focus on cultural content and representation:
+  - brand_name: The brand or product being advertised.
+  - main_text: The primary text or headline shown in the ad.
+  - visual_summary: Describe what the ad depicts in terms of people, settings, and cultural signals. Note: who is shown (age, gender presentation, ethnicity if apparent, body type, clothing style), what they are doing (activity, pose, social situation), what setting or lifestyle is portrayed (domestic, professional, outdoors, luxury, casual), and what values or aspirations the ad seems to communicate (health, wealth, beauty, convenience, belonging, independence, etc.). Note the overall aesthetic and tone.
+- If "UI_ONLY" or "BROKEN": Leave fields null.
 
 ### OUTPUT FORMAT
 {
@@ -85,42 +69,56 @@ Determine the image category:
 }"""
 
 STEP2A_SYSTEM = (
-    'Analyze this ad description and identify the core "marketing hook" or psychological '
-    "mechanism used. Do NOT categorize it yet. Just describe the specific appeal in 2-4 words.\n"
-    'Examples: "scarcity urgency", "social proof testimonial", "luxury status signaling", '
-    '"problem-solution utility".\nOutput ONLY the hook phrase.'
+    "You are analyzing an advertisement for a cultural research study on social values "
+    "in advertising.\n"
+    "Examine this ad description and identify the core cultural theme or social value "
+    "being promoted.\n"
+    "Do NOT categorize it yet. Just describe the central value or cultural message in "
+    "2-4 words.\n"
+    'Examples of good outputs: "aspirational wealth display", "domestic comfort ideals", '
+    '"youthful beauty standards", "self-improvement imperative", "communal belonging", '
+    '"health anxiety", "tech-enabled convenience", "masculine achievement", '
+    '"environmental consciousness", "feminine empowerment".\n'
+    "Output ONLY the theme phrase, nothing else."
 )
 
-STEP2B_TEMPLATE = """You are an expert analyst specializing in {criterion}.
+STEP2B_TEMPLATE = """You are a Cultural Studies Researcher examining how advertising reflects and constructs social values.
 
-I have analyzed a dataset of items and extracted the following specific patterns/hooks:
+Below are cultural themes identified across a dataset of real advertisements collected from social media users in Australia:
 {hooks_json}
 
 TASK:
-Group these patterns into exactly {k} distinct, high-level {criterion} clusters.
+Group these themes into exactly {k} distinct cultural value categories.
+
+Each category should represent a coherent set of social values, aspirations, or cultural narratives that ads communicate to audiences.
+
 The categories must be mutually exclusive and collectively exhaustive for this dataset.
+
+Think about this from a cultural analysis perspective: what different visions of "the good life" or social identity are being constructed?
 
 OUTPUT JSON FORMAT ONLY:
 {{
     "clusters": [
         {{
             "name": "CATEGORY_NAME (2-3 words)",
-            "definition": "A 1-sentence definition of what this cluster entails.",
-            "keywords": ["list", "of", "representative", "hooks"]
+            "definition": "A plain-language description of the cultural values or social narrative this category represents.",
+            "keywords": ["list", "of", "representative", "themes"]
         }}
     ]
 }}"""
 
-STEP3_SYSTEM_TEMPLATE = """You are classifying ads into specific strategies.
+STEP3_SYSTEM_TEMPLATE = """You are classifying advertisements by their cultural message for a research study.
 
-AVAILABLE STRATEGIES:
+AVAILABLE CULTURAL CATEGORIES:
 {clusters_context}
 
 TASK:
-Assign the advertisement below to the SINGLE best fitting strategy from the list above.
+Based on the advertisement description below, assign it to the SINGLE best fitting cultural category from the list above.
+
+Consider: what is the dominant cultural value, lifestyle, or social identity this ad promotes or assumes?
 
 OUTPUT FORMAT:
-Return ONLY the exact strategy name from the list. Nothing else."""
+Return ONLY the exact category name from the list. Nothing else."""
 
 
 # ---------------------------------------------------------------------------
@@ -869,7 +867,7 @@ def run_step2b(
         hooks_json=json.dumps(top_hooks, indent=2), k=num_clusters, criterion=criterion
     )
     response = llm.generate_single(
-        f"You are an expert analyst specializing in {criterion}.", user_msg, max_tokens=800
+        "You are a Cultural Studies Researcher examining how advertising reflects and constructs social values.", user_msg, max_tokens=800
     )
     response = _strip_thinking(response)
 
@@ -1054,7 +1052,7 @@ def export_results(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="ICTC VLM Clustering — single-GPU shard script (unified Qwen 3.5)",
+        description="ICTC VLM Clustering — Track 3: Cultural Representation & Social Values (unified Qwen 3.5)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -1155,7 +1153,7 @@ def parse_args() -> argparse.Namespace:
                    help="Number of clusters K to produce.")
     p.add_argument("--top_hooks", type=int, default=60,
                    help="Top-N most frequent hooks fed to Step 2b cluster synthesis.")
-    p.add_argument("--criterion", type=str, default="Marketing Strategy",
+    p.add_argument("--criterion", type=str, default="Cultural Representation & Social Values",
                    help="Clustering criterion. Examples: 'Marketing Strategy', "
                         "'Visual Design Style', 'Target Audience'.")
 
@@ -1293,7 +1291,7 @@ def main() -> None:
     ckpt = CheckpointManager(actual_output)
 
     log.info("=" * 70)
-    log.info("ICTC Single-GPU Shard Run")
+    log.info("ICTC Track 3: Cultural Representation & Social Values — Single-GPU Run")
     log.info(f"  shard_id          : {args.shard_id or '(none)'}")
     log.info(f"  ads_dir           : {args.ads_dir}")
     log.info(f"  output_dir        : {actual_output}")

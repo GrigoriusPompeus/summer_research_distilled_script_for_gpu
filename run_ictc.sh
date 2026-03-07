@@ -60,7 +60,7 @@ LLM_TP=""   # e.g. "1" — tensor parallel for LLM  (overrides NUM_GPUS)
 #   GPU_IDS="2,3"      # use GPUs 2 and 3 (useful on shared nodes)
 GPU_IDS=""
 
-GPU_UTIL=0.90         # vLLM memory utilization per GPU (lower if you see OOM on load)
+GPU_UTIL=0.90         # vLLM memory utilisation per GPU (lower if you see OOM on load)
 ENFORCE_EAGER=""      # set to "--enforce_eager" to disable CUDA graph (saves VRAM)
 SWAP_SPACE=4          # CPU swap space per GPU in GB (increase for large models)
 # ─────────────────────────────────────────────────────────────────────────────

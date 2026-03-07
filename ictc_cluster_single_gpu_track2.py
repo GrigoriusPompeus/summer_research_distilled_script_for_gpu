@@ -9,9 +9,9 @@ algorithm places individuals into based on the ads they are shown.
 
 Pipeline (always unified — single model for all steps):
   Step 0  — Discover images, select shard range [start_index, end_index)
-  Step 1  — VLM extraction   : analyze "Assumed User Identity" per ad image
+  Step 1  — VLM extraction   : analyse "Assumed User Identity" per ad image
   Step 2a — Persona extraction: extract 2-4 word algorithmic persona per ad
-  Step 2b — Cluster synthesis : synthesize K "Algorithmic Identity Clusters"
+  Step 2b — Cluster synthesis : synthesise K "Algorithmic Identity Clusters"
   Step 3  — Assignment        : assign each ad -> best identity cluster
 
 Usage:
@@ -822,7 +822,7 @@ def run_step2b(
     criterion: str,
     log: logging.Logger,
 ) -> Dict:
-    """Synthesize K cluster definitions from the top hooks — single LLM call."""
+    """Synthesise K cluster definitions from the top hooks — single LLM call."""
     CLUSTERS_FILE = "step2b_dynamic_clusters.json"
     META_FILE = "step2b_metadata.json"
 
@@ -1088,7 +1088,7 @@ def parse_args() -> argparse.Namespace:
                    help="CUDA device ID to use, e.g. '0'. "
                         "Sets CUDA_VISIBLE_DEVICES before any GPU code runs.")
     p.add_argument("--gpu_util", type=float, default=0.90,
-                   help="vLLM GPU memory utilization (0.0–1.0). "
+                   help="vLLM GPU memory utilisation (0.0–1.0). "
                         "Lower this if you see OOM during model load.")
 
     # ── Precision / quantization ───────────────────────────────────────────

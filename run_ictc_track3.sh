@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_ictc_track2.sh  —  Launch ICTC Track 2: Algorithmic Identity & Profiling
+# run_ictc_track3.sh  —  Launch ICTC Track 3: Cultural Representation & Social Values
 #
-# Uses the SAME images as Track 1 (full_run) but with different prompts that
-# analyse the "Assumed User Identity" and "Algorithmic Persona" of each ad.
+# Uses the SAME images as Tracks 1 & 2 but with different prompts that
+# analyse cultural content, representation, and social values in ads.
 #
 # Usage:
-#   chmod +x run_ictc_track2.sh
-#   ./run_ictc_track2.sh                          # full run with defaults
-#   ./run_ictc_track2.sh --end_index 100          # smoke test (100 ads)
-#   ./run_ictc_track2.sh --steps 2a,2b,3          # skip VLM, resume from captions
+#   chmod +x run_ictc_track3.sh
+#   ./run_ictc_track3.sh                          # full run with defaults
+#   ./run_ictc_track3.sh --end_index 100          # smoke test (100 ads)
+#   ./run_ictc_track3.sh --steps 2a,2b,3          # skip VLM, resume from captions
 #
 # The script:
-#   1. Creates (or attaches to) a tmux session named "ictc_t2" so the job survives
+#   1. Creates (or attaches to) a tmux session named "ictc_t3" so the job survives
 #      SSH disconnections.
 #   2. Activates the venv environment.
-#   3. Runs ictc_cluster_single_gpu_track2.py — all output also goes to OUTPUT_DIR/logs/.
+#   3. Runs ictc_cluster_single_gpu_track3.py — all output also goes to OUTPUT_DIR/logs/.
 #   4. Check progress any time:
-#        tmux attach -t ictc_t2
-#        tail -f <OUTPUT_DIR>/track2_identity/logs/ictc_*.log
+#        tmux attach -t ictc_t3
+#        tail -f <OUTPUT_DIR>/track3_cultural/logs/ictc_*.log
 # =============================================================================
 
 set -euo pipefail
@@ -40,7 +40,7 @@ QUANTIZATION=""       # leave blank for none
 
 # ─── CLUSTERING PARAMETERS ───────────────────────────────────────────────────
 NUM_CLUSTERS=5
-CRITERION="Algorithmic Identity Profiling"
+CRITERION="Cultural Representation & Social Values"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── PERFORMANCE TUNING ──────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ SEED=42
 
 # ─── PIPELINE CONTROL ────────────────────────────────────────────────────────
 STEPS="1,2a,2b,3"
-SHARD_ID="track2_identity"
+SHARD_ID="track3_cultural"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── PYTHON ENVIRONMENT ──────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ VENV_PATH="$HOME/ictc_env"
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSION="ictc_t2"
+SESSION="ictc_t3"
 
 # Build argument string
 build_args() {
@@ -90,11 +90,11 @@ build_args() {
 }
 
 ENV_CMD="source ${VENV_PATH}/bin/activate && HF_HOME=/mnt/nvme0n1/cache/huggingface"
-PYTHON_CMD="${ENV_CMD} python3 ${SCRIPT_DIR}/ictc_cluster_single_gpu_track2.py $(build_args "$@")"
+PYTHON_CMD="${ENV_CMD} python3 ${SCRIPT_DIR}/ictc_cluster_single_gpu_track3.py $(build_args "$@")"
 
 # ── Print config summary ──────────────────────────────────────────────────────
 echo "======================================================================"
-echo "  ICTC Track 2: Algorithmic Identity & Profiling"
+echo "  ICTC Track 3: Cultural Representation & Social Values"
 echo "  ads_dir      : ${ADS_DIR}"
 echo "  output_dir   : ${OUTPUT_DIR}/${SHARD_ID}"
 echo "  vlm_model    : ${VLM_MODEL}"
@@ -111,7 +111,7 @@ if command -v tmux &>/dev/null; then
         echo ""
         echo "Session '${SESSION}' already exists."
         echo "  To attach: tmux attach -t ${SESSION}"
-        echo "  To kill and restart: tmux kill-session -t ${SESSION} && ./run_ictc_track2.sh"
+        echo "  To kill and restart: tmux kill-session -t ${SESSION} && ./run_ictc_track3.sh"
         echo "  To tail logs: tail -f ${OUTPUT_DIR}/${SHARD_ID}/logs/ictc_*.log"
         tmux attach -t "${SESSION}"
     else

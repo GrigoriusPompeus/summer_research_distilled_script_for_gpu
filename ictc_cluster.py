@@ -12,7 +12,7 @@ Pipeline (unified mode — default):
   Step 0  — Discover images from dataset structure
   Step 1  — Qwen3.5-27B captioning : image -> JSON {category, brand, text, description}
   Step 2a — Same model (text-only)  : extract 2-4 word marketing hook per ad
-  Step 2b — Same model (text-only)  : synthesize K cluster definitions from top hooks
+  Step 2b — Same model (text-only)  : synthesise K cluster definitions from top hooks
   Step 3  — Same model (text-only)  : assign each ad -> best cluster
 
   In unified mode the model stays loaded for all steps — no expensive
@@ -823,7 +823,7 @@ def run_step2b(
     criterion: str,
     log: logging.Logger,
 ) -> Dict:
-    """Synthesize K cluster definitions from the top hooks — single LLM call."""
+    """Synthesise K cluster definitions from the top hooks — single LLM call."""
     CLUSTERS_FILE = "step2b_dynamic_clusters.json"
     META_FILE = "step2b_metadata.json"
 
@@ -1086,7 +1086,7 @@ def parse_args() -> argparse.Namespace:
                         "Sets CUDA_VISIBLE_DEVICES before any GPU code runs. "
                         "Leave unset to use all available GPUs.")
     p.add_argument("--gpu_util", type=float, default=0.90,
-                   help="vLLM GPU memory utilization per device (0.0–1.0). "
+                   help="vLLM GPU memory utilisation per device (0.0–1.0). "
                         "Lower this if you see OOM during model load.")
 
     # ── Precision / quantization ───────────────────────────────────────────
