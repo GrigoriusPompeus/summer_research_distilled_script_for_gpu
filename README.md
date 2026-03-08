@@ -18,6 +18,8 @@ Based on **Experiment 3B** findings: a single Qwen 3.5 model handles both vision
 | `run_ictc_single_gpu.sh` | tmux wrapper for Track 1 single-GPU runs |
 | `run_ictc_track2.sh` | tmux wrapper for Track 2 single-GPU runs (session: `ictc_t2`) |
 | `run_ictc_track3.sh` | tmux wrapper for Track 3 single-GPU runs (session: `ictc_t3`) |
+| `ictc_recluster.py` | **Re-clustering script** — re-run Steps 2a/2b/3 from existing VLM captions with a different K, without overwriting originals |
+| `run_recluster_k10.sh` | tmux wrapper to re-cluster all 3 tracks with K=10 (session: `ictc_k10`) |
 | `requirements_cluster.txt` | pip dependencies (torch, vLLM, transformers, pillow, tqdm) |
 
 ---
@@ -184,6 +186,62 @@ chmod +x run_ictc_track3.sh
 | Step 3 | Assigns to strategy | Assigns to cultural category |
 
 **Isolation**: Track 3 results go to `output_dir/track3_cultural/`, completely separate from Tracks 1 and 2. The tmux session is named `ictc_t3` so all three tracks can run sequentially on the same GPU.
+
+---
+
+## Re-clustering Script: `ictc_recluster.py`
+
+A lightweight script that **re-runs Steps 2a/2b/3 from existing VLM captions** with a different number of clusters (K). This avoids re-running the expensive Step 1 VLM captioning (~24 hours) and writes output to a **new directory** so original results are never overwritten.
+
+Supports all 3 prompt tracks via the `--track` flag.
+
+```bash
+# Re-cluster Track 1 with K=10 (reuses captions + hooks from full_run/)
+python ictc_recluster.py \
+  --source_dir /data/out/full_run \
+  --output_dir /data/out/track1_k10 \
+  --track 1 --num_clusters 10
+
+# Re-cluster Track 2 with K=10
+python ictc_recluster.py \
+  --source_dir /data/out/track2_identity \
+  --output_dir /data/out/track2_k10 \
+  --track 2 --num_clusters 10
+
+# Re-cluster Track 3 with K=10, also re-extract themes from scratch
+python ictc_recluster.py \
+  --source_dir /data/out/track3_cultural \
+  --output_dir /data/out/track3_k10 \
+  --track 3 --num_clusters 10 --redo_2a
+
+# Or run all 3 tracks sequentially via tmux wrapper (session: ictc_k10)
+chmod +x run_recluster_k10.sh
+./run_recluster_k10.sh
+```
+
+**How it works:**
+
+1. Reads `step1_captions.json` from the source track directory
+2. Copies `step2a_hooks.json` from source (or re-extracts with `--redo_2a`)
+3. Runs Step 2b (synthesise K clusters) — single LLM call, takes seconds
+4. Runs Step 3 (assign all ads) — batched text inference, takes ~15-30 minutes
+5. Exports `ictc_final_results.json` to the new output directory
+
+**Key flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--source_dir` | *(required)* | Directory with existing `step1_captions.json` |
+| `--output_dir` | *(required)* | NEW directory for re-clustered output |
+| `--track` | *(required)* | Prompt track: `1` (Marketing), `2` (Identity), `3` (Cultural) |
+| `--num_clusters` | `10` | Number of output clusters (K) |
+| `--redo_2a` | off | Re-extract Step 2a labels instead of copying from source |
+| `--vlm_model` | `Qwen/Qwen3.5-9B` | Model for text generation |
+| `--top_hooks` | `60` | Top-N hooks fed into Step 2b synthesis |
+| `--batch_llm` | `64` | Prompts per text batch |
+| `--max_model_len` | `4096` | Context window (text-only needs less than VLM) |
+
+**Note**: The script only loads the model for text-only inference (no image processing), so it uses less VRAM than the full pipeline. On A100-40GB with Qwen3.5-9B, expect ~15-30 minutes per track for Step 3 assignment.
 
 ---
 
@@ -404,6 +462,14 @@ python ictc_cluster_single_gpu_track3.py --ads_dir /data/ads --output_dir /data/
 # Or via tmux wrapper:
 ./run_ictc_track3.sh
 
+# ── Re-cluster any track with different K (reuses VLM captions) ──────────────
+python ictc_recluster.py \
+  --source_dir /data/out/full_run \
+  --output_dir /data/out/track1_k10 \
+  --track 1 --num_clusters 10
+# Or run all 3 tracks with K=10 via tmux wrapper:
+./run_recluster_k10.sh
+
 # ── Use only GPUs 2 and 3 on a shared node ───────────────────────────────────
 python ictc_cluster.py \
   --ads_dir /data/ads --output_dir /data/out \
@@ -540,12 +606,20 @@ tmux attach -t ictc_t3       # Ctrl+B then D to detach
 tail -f /mnt/nvme0n1/data/output/ictc_production/track3_cultural/logs/ictc_*.log
 # Results at:
 /mnt/nvme0n1/data/output/ictc_production/track3_cultural/ictc_final_results.json
+
+# ── Re-clustered with K=10 ───────────────────────────────────────────────────
+tmux attach -t ictc_k10      # Ctrl+B then D to detach
+# Results at:
+/mnt/nvme0n1/data/output/ictc_production/track1_k10/ictc_final_results.json
+/mnt/nvme0n1/data/output/ictc_production/track2_k10/ictc_final_results.json
+/mnt/nvme0n1/data/output/ictc_production/track3_k10/ictc_final_results.json
 ```
 
 Launcher scripts on the server:
 - `~/run_ictc_single_gpu.sh` — Track 1 (tmux session: `ictc`)
 - `~/run_ictc_track2.sh` — Track 2 (tmux session: `ictc_t2`)
 - `~/run_ictc_track3.sh` — Track 3 (tmux session: `ictc_t3`)
+- `~/run_recluster_k10.sh` — All 3 tracks re-clustered with K=10 (tmux session: `ictc_k10`)
 
 ### If You Need to Re-run or Change Criteria
 

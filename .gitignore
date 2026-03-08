@@ -5,3 +5,4 @@ uq_aio.pem
 # Python cache
 __pycache__/
 *.pyc
+results/
