@@ -21,6 +21,9 @@ Based on **Experiment 3B** findings: a single Qwen 3.5 model handles both vision
 | `ictc_recluster.py` | **Re-clustering script** — re-run Steps 2a/2b/3 from existing VLM captions with a different K, without overwriting originals |
 | `run_recluster_k10.sh` | tmux wrapper to re-cluster all 3 tracks with K=10 (session: `ictc_k10`) |
 | `requirements_cluster.txt` | pip dependencies (torch, vLLM, transformers, pillow, tqdm) |
+| `analysis/eda_and_findings.py` | **EDA script** — 15 figures covering dataset overview, cluster distributions, platform analysis, data quality |
+| `analysis/research_findings.py` | **Research findings script** — 5 figures answering RQ1 (track effect) and RQ2 (K effect), plus recommendations |
+| `analysis/figures/` | All 20 generated figures (see [Analysis Figures Reference](#analysis-figures-reference)) |
 
 ---
 
@@ -671,3 +674,317 @@ The paper uses LLaVA-1.5 7B + GPT-4o on ~5k images. This implementation extends 
 - **200k+ scale** — batched inference, multi-day checkpoint/resume
 - **Iterative refinement** — re-run clustering steps with new criteria in minutes, reusing VLM outputs
 - **Quantization** — AWQ/GPTQ/FP8 to fit larger models on fewer GPUs
+
+---
+
+## Research Findings
+
+Full analysis scripts and figures are in the [`analysis/`](analysis/) directory:
+- `analysis/eda_and_findings.py` — Exploratory data analysis (15 figures)
+- `analysis/research_findings.py` — Research question analysis (5 figures)
+- `analysis/figures/` — All generated figures (20 total)
+
+### Dataset Summary
+
+| Metric | Value |
+|--------|-------|
+| Total images scanned | 86,446 |
+| Platforms | Facebook (61.5%), Instagram (20.5%), TikTok (10.9%), YouTube (7.2%) |
+| Ad formats | 13 types; Feed (59.0%), Reel (12.1%), Reel from Search (10.3%), Story (6.6%), Marketplace (5.4%) |
+| Track 1 valid ads | 76,434 (88.4%) |
+| Track 2 valid ads | 79,220 (91.6%) |
+| Track 3 valid ads | 79,525 (92.1%) |
+| Model | Qwen/Qwen3.5-9B (unified mode, bf16, single A100-40GB) |
+
+### Cluster Results
+
+#### Track 1: Marketing Strategy (K=5)
+
+| Cluster | Ads | % |
+|---------|----:|--:|
+| Curiosity & Direct Engagement | 21,386 | 28.0% |
+| Exclusivity & Scarcity | 21,328 | 27.9% |
+| Value, Utility & Risk Reversal | 21,029 | 27.5% |
+| Emotional & Aspirational Connection | 9,251 | 12.1% |
+| Social Proof & Validation | 3,440 | 4.5% |
+
+![Track 1 K=5 Distribution](analysis/figures/02_cluster_distributions_k5.png)
+
+#### Track 2: Algorithmic Identity (K=5)
+
+| Cluster | Ads | % |
+|---------|----:|--:|
+| Generic Ad Inventory | 35,686 | 45.0% |
+| Aspirational Identity Seekers | 15,255 | 19.3% |
+| Transactional Deal Hunters | 14,279 | 18.0% |
+| Wellness & Bio-Optimizers | 7,755 | 9.8% |
+| Time-Poor Convenience Seekers | 6,245 | 7.9% |
+
+#### Track 3: Cultural Representation (K=5)
+
+| Cluster | Ads | % |
+|---------|----:|--:|
+| Self-Optimization & Identity | 28,036 | 35.3% |
+| Economic Security & Aspiration | 21,091 | 26.5% |
+| Community & Belonging | 11,486 | 14.4% |
+| Market Transparency & Ethics | 10,793 | 13.6% |
+| Convenience & Instant Gratification | 8,119 | 10.2% |
+
+![Cultural Values K=5 vs K=10](analysis/figures/15_cultural_values.png)
+
+---
+
+### RQ1: How Does the Choice of Analytical Track Affect Clustering?
+
+**The 3 tracks capture fundamentally different dimensions of the same ads.** Cross-track agreement is very low, confirming they are complementary rather than redundant.
+
+| Track Pair | ARI | NMI | Cramer's V |
+|------------|----:|----:|-----------:|
+| Marketing vs Identity | 0.104 | 0.118 | 0.290 |
+| Marketing vs Cultural | 0.052 | 0.080 | 0.241 |
+| Identity vs Cultural | 0.089 | 0.168 | 0.367 |
+
+*ARI (Adjusted Rand Index): 0 = random agreement, 1 = identical clusterings. Values below 0.1 indicate the tracks produce fundamentally different groupings.*
+
+![Cross-Track Contingency](analysis/figures/rq1_01_cross_track_contingency.png)
+
+**Track choice matters 2–3x more than platform.** The choice of analytical track has a much larger effect on clustering outcomes than which platform an ad appeared on:
+
+| Source of variation | Cramer's V range | Interpretation |
+|---------------------|-----------------|----------------|
+| Platform effect on clusters | 0.10 – 0.14 | Weak to moderate |
+| Track choice effect on clusters | 0.24 – 0.37 | Moderate to strong |
+
+This means **track selection is the single most important methodological decision** when using ICTC for ad analysis. Running all 3 tracks on the same dataset is strongly recommended — using only one track misses 70–80% of the analytical picture.
+
+![Cluster Purity Across Tracks](analysis/figures/rq1_02_cluster_purity.png)
+
+**Conditional entropy analysis** shows that knowing an ad's cluster in one track tells you very little about its cluster in another track (normalized conditional entropy 0.73–0.86). The tracks are genuinely independent analytical dimensions.
+
+---
+
+### RQ2: How Does the Choice of K Affect Clustering?
+
+#### Balance Metrics
+
+| Track | K | Norm. Entropy | Largest Cluster | Effective Clusters | CV |
+|-------|--:|:-------------:|:---------------:|:------------------:|:--:|
+| Marketing | 5 | 0.909 | 28.0% | 5 | 0.49 |
+| Marketing | 10 | 0.839 | 33.8% | 9 | 0.94 |
+| Identity | 5 | 0.878 | 45.0% | 5 | 0.66 |
+| Identity | 10 | 0.878 | 30.2% | 10 | 0.80 |
+| Cultural | 5 | 0.934 | 35.3% | 5 | 0.47 |
+| Cultural | 10 | 0.939 | 20.8% | 10 | 0.52 |
+
+*Normalized entropy: 1.0 = perfectly balanced. CV = coefficient of variation of cluster sizes.*
+
+![K=5 vs K=10 Effect](analysis/figures/rq2_02_k_effect_summary.png)
+
+#### K=5 → K=10: Subdivision or Reorganization?
+
+Going from K=5 to K=10 does **not** simply subdivide existing clusters — it significantly reorganizes them:
+
+| Track | ARI (K=5 ↔ K=10) | Interpretation |
+|-------|:-----------------:|----------------|
+| Marketing | 0.160 | Significant reorganization |
+| Identity | 0.429 | Mostly subdivision |
+| Cultural | 0.258 | Significant reorganization |
+
+Identity is the most stable track (its K=5 clusters largely map to specific K=10 clusters), while Marketing reorganizes the most.
+
+![K=5 to K=10 Mapping](analysis/figures/rq2_01_k5_to_k10_mapping.png)
+
+#### The "Noise Sink" Problem at K=10
+
+At K=10, the LLM spontaneously creates dedicated clusters that absorb data quality issues:
+
+| Track | Noise-Sink Cluster | Ads Absorbed | % |
+|-------|-------------------|:------------:|--:|
+| Marketing K=10 | Data Quality Issues | 25,835 | 33.8% |
+| Identity K=10 | Algorithmic Placeholders | 23,957 | 30.2% |
+| Identity K=10 | Data Void / Unprofiled | 1,774 | 2.2% |
+
+At K=5, these same noisy ads (hooks like "no ad description provided") are distributed across real clusters — e.g., in Marketing K=5 they go to "Curiosity & Direct Engagement" (72%). K=10 isolates noise, which is both useful (cleaner real clusters) and problematic (inflates the noise category).
+
+**Recommendation:** Start with K=5 for presentation. Use K=10 for deep-dive analysis. Consider K=7–8 as a middle ground (the `ictc_recluster.py` script makes this cheap to test).
+
+---
+
+### Key Findings for the Australian Ad Observatory
+
+#### Finding 1: Platform Differences Are Statistically Significant but Small
+
+All 3 tracks show significant chi-square tests (p < 0.001), but effect sizes are weak to moderate:
+
+| Track | Chi-square | Cramer's V | Strength |
+|-------|:----------:|:----------:|----------|
+| Marketing Strategy | 2,706 | 0.107 | Moderate |
+| Algorithmic Identity | 2,512 | 0.100 | Moderate |
+| Cultural Representation | 4,779 | 0.144 | Moderate |
+
+**Implication:** The 4 platforms use remarkably similar advertising playbooks. Advertising regulation does not need to be platform-specific — the strategies are largely universal.
+
+![Platform × Cluster Heatmap](analysis/figures/05_platform_cluster_heatmap_k5.png)
+![Standardized Residuals](analysis/figures/11_residuals_heatmap.png)
+
+#### Finding 2: The Surveillance Blind Spot
+
+**41.3% of ads in Track 2 show no specific identity profiling** — the "Generic Ad Inventory" cluster represents ads where the platform constructs no meaningful "data double" for the viewer. This challenges the narrative that all digital advertising is hyper-targeted.
+
+| Platform | Generic Ad Inventory | Relative to base rate |
+|----------|:--------------------:|:---------------------:|
+| Facebook | 64.4% of generic ads | 1.05x (slightly over) |
+| Instagram | 24.4% | 1.19x (notably over) |
+| TikTok | 6.1% | 0.56x (much less generic) |
+| YouTube | 5.0% | 0.70x (less generic) |
+
+**TikTok is the least "generic"** — it does the most identity profiling. Instagram is the most — it serves the highest proportion of untargeted ads relative to its size.
+
+At K=10, the same pattern appears: "Algorithmic Placeholders" (30.2%) + "Data Void / Unprofiled" (2.2%) = 32.5% of ads with no meaningful identity targeting.
+
+![Identity Profiling by Platform](analysis/figures/14_identity_profiling.png)
+
+#### Finding 3: "Self-Optimization" Dominates Cultural Narratives
+
+"Self-Optimization & Identity" is the **#1 cultural narrative on every platform** — advertising overwhelmingly frames identity as a project of constant self-improvement:
+
+| Platform | Self-Optimization % |
+|----------|:-------------------:|
+| TikTok | 43.1% |
+| Facebook | 35.9% |
+| YouTube | 33.2% |
+| Instagram | 29.7% |
+
+TikTok leads with the strongest self-optimization messaging. This is a potential cultural health indicator worth tracking over time.
+
+#### Finding 4: TikTok Is the Most Distinctive Platform
+
+Across all 3 tracks, TikTok shows the most distinctive advertising profile compared to Facebook:
+
+| Track | Cluster | Facebook | TikTok | Difference |
+|-------|---------|:--------:|:------:|:----------:|
+| Marketing | Emotional & Aspirational | 11.5% | 19.4% | **+8.0pp** |
+| Marketing | Exclusivity & Scarcity | 30.5% | 21.6% | **-9.0pp** |
+| Identity | Aspirational Identity Seekers | 18.3% | 28.7% | **+10.4pp** |
+| Identity | Generic Ad Inventory | 45.2% | 27.0% | **-18.2pp** |
+| Cultural | Self-Optimization & Identity | 35.9% | 43.1% | **+7.2pp** |
+
+TikTok uses more emotional/aspirational marketing, does more specific identity targeting (less "generic inventory"), and embeds stronger self-optimization cultural messaging.
+
+![Platform Comparison](analysis/figures/13_platform_comparison.png)
+
+#### Finding 5: YouTube Has the Highest Image Filtering Rate
+
+**30.4% of YouTube ad images were filtered** (broken or UI screenshots), compared to only 5.8% for Facebook. This is an important data quality consideration — YouTube's ad capture via browser extension produces more non-ad screenshots.
+
+| Platform | Filtering Rate |
+|----------|:--------------:|
+| YouTube | 30.4% |
+| TikTok | 20.3% |
+| Instagram | 17.7% |
+| Facebook | 5.8% |
+
+![Data Quality by Platform](analysis/figures/09_data_quality.png)
+
+#### Finding 6: Cross-Track Correlations Reveal Advertising Archetypes
+
+The strongest cross-track mappings reveal recurring advertising archetypes:
+
+| Marketing Strategy | → Most Common Identity | → Most Common Cultural Value |
+|--------------------|-----------------------|------------------------------|
+| Emotional & Aspirational | Generic Ad Inventory (30%) | Self-Optimization & Identity (64%) |
+| Value, Utility & Risk Reversal | Generic Ad Inventory (49%) | Economic Security & Aspiration (45%) |
+| Exclusivity & Scarcity | Aspirational Identity Seekers (47%) | Economic Security & Aspiration (29%) |
+| Social Proof & Validation | Generic Ad Inventory (49%) | Market Transparency & Ethics (36%) |
+| Curiosity & Direct Engagement | Generic Ad Inventory (71%) | Self-Optimization & Identity (35%) |
+
+The cross-track Cramer's V values (0.24–0.37) indicate moderate association — the tracks are correlated but far from redundant.
+
+![Cross-Track Correlation](analysis/figures/12_cross_track_correlation.png)
+
+#### Finding 7: Marketplace Ads Cluster Differently
+
+Facebook Marketplace ads (5.4% of all ads, Facebook-only) show distinct patterns:
+
+| Track | Difference vs Non-Marketplace |
+|-------|-------------------------------|
+| Marketing | +5.8pp Value/Utility, -6.5pp Curiosity |
+| Cultural | +7.0pp Self-Optimization, -4.6pp Community |
+
+Marketplace ads are more transactional and less community-oriented. They should be flagged or analyzed separately in aggregate statistics.
+
+---
+
+### Recommendations for Future Researchers
+
+#### Track Selection
+
+| Track | Use when researching... |
+|-------|------------------------|
+| **Track 1: Marketing Strategy** | Persuasion tactics, dark patterns, consumer manipulation, ad regulation compliance |
+| **Track 2: Algorithmic Identity** | Algorithmic profiling, surveillance capitalism, data doubles, discriminatory targeting |
+| **Track 3: Cultural Representation** | Cultural narratives, social values, representation, normative messaging |
+
+**Run multiple tracks.** The low cross-track agreement (ARI 0.05–0.10) proves they are complementary — running only one track misses most of the analytical picture.
+
+#### K Selection
+
+| K | Best for... | Trade-offs |
+|---|-------------|------------|
+| **K=5** | Presentation, initial exploration | All clusters meaningful; no noise sinks; easier to communicate |
+| **K=7–8** | Balanced analysis | Untested but cheap to try via `ictc_recluster.py` |
+| **K=10** | Deep-dive content analysis | Finer themes emerge (e.g., "Domesticity & Comfort"); but noise-sink clusters absorb 30–34% |
+
+#### Data Quality
+
+1. **Pre-filter UI screenshots** before VLM captioning — a simple CNN classifier (ResNet-18) could save 8–12% of GPU time
+2. **Pre-tag "Sponsored-only" ads** (~3%) and exclude from hook extraction
+3. **Visual-only ads** (~7% with hooks like "no ad description provided") reflect a genuine limitation of text-based clustering — future work should add image-embedding clustering (CLIP/SigLIP)
+
+#### Future Directions
+
+**Immediate (current infrastructure):**
+1. **Multi-K consensus clustering** — Run K=5,7,10,15 and compute consensus; ads that cluster together across K values are the most robust
+2. **Track fusion** — Combine labels from all 3 tracks for richer "advertising archetypes" (e.g., "Scarcity Marketing + Deal Hunter + Instant Gratification")
+3. **Temporal analysis** — The dataset has timestamps; track cluster distribution shifts over time
+4. **Advertiser-level analysis** — Group by brand (extractable from VLM captions) to see which companies use which strategies
+
+**Medium-term:**
+5. **Larger models** — Qwen 3.5-27B outperformed 9B in the 300-image pilot (Experiment 3B); running 86K ads on 27B would likely improve cluster coherence
+6. **Visual embedding clustering** — CLIP/SigLIP image embeddings to capture visual strategies that text-based hooks miss
+7. **Multi-country comparison** — Same pipeline on non-Australian Ad Observatory datasets to reveal cross-cultural advertising differences
+8. **Longitudinal monitoring** — Deploy as a scheduled job to track advertising ecosystem changes over time
+
+---
+
+### Analysis Figures Reference
+
+#### Exploratory Data Analysis (`eda_and_findings.py`)
+
+| Figure | Description |
+|--------|-------------|
+| [`01_platform_distribution.png`](analysis/figures/01_platform_distribution.png) | Platform pie chart and ad format breakdown |
+| [`02_cluster_distributions_k5.png`](analysis/figures/02_cluster_distributions_k5.png) | K=5 cluster distributions for all 3 tracks |
+| [`03_cluster_distributions_k10.png`](analysis/figures/03_cluster_distributions_k10.png) | K=10 cluster distributions for all 3 tracks |
+| [`04_cluster_balance.png`](analysis/figures/04_cluster_balance.png) | Entropy, largest cluster %, effective clusters |
+| [`05_platform_cluster_heatmap_k5.png`](analysis/figures/05_platform_cluster_heatmap_k5.png) | Platform x cluster heatmaps with chi-square stats |
+| [`06_format_cluster_heatmap.png`](analysis/figures/06_format_cluster_heatmap.png) | Ad format x cultural values heatmap (Track 3, K=10) |
+| [`07_platform_profiles.png`](analysis/figures/07_platform_profiles.png) | Each platform's cluster fingerprint across all tracks |
+| [`08_hook_diversity.png`](analysis/figures/08_hook_diversity.png) | Top 20 VLM-generated labels and diversity metrics |
+| [`09_data_quality.png`](analysis/figures/09_data_quality.png) | Image filtering rate by track and platform |
+| [`10_k5_vs_k10.png`](analysis/figures/10_k5_vs_k10.png) | K=5 vs K=10 entropy and largest cluster comparison |
+| [`11_residuals_heatmap.png`](analysis/figures/11_residuals_heatmap.png) | Standardized residuals: where platforms deviate most |
+| [`12_cross_track_correlation.png`](analysis/figures/12_cross_track_correlation.png) | Marketing → Identity and Marketing → Cultural mappings |
+| [`13_platform_comparison.png`](analysis/figures/13_platform_comparison.png) | Side-by-side platform comparison across all 3 tracks |
+| [`14_identity_profiling.png`](analysis/figures/14_identity_profiling.png) | "Data double" identity composition by platform |
+| [`15_cultural_values.png`](analysis/figures/15_cultural_values.png) | Cultural narrative pie charts: K=5 vs K=10 |
+
+#### Research Questions (`research_findings.py`)
+
+| Figure | Description |
+|--------|-------------|
+| [`rq1_01_cross_track_contingency.png`](analysis/figures/rq1_01_cross_track_contingency.png) | How clusters from different tracks overlap (with ARI/NMI) |
+| [`rq1_02_cluster_purity.png`](analysis/figures/rq1_02_cluster_purity.png) | Which clusters are track-specific vs cross-cutting |
+| [`rq2_01_k5_to_k10_mapping.png`](analysis/figures/rq2_01_k5_to_k10_mapping.png) | K=5 → K=10: subdivision vs reorganization |
+| [`rq2_02_k_effect_summary.png`](analysis/figures/rq2_02_k_effect_summary.png) | 4-panel K effect comparison |
+| [`rq_summary.png`](analysis/figures/rq_summary.png) | One-page research summary |
